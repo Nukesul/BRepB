@@ -4,26 +4,36 @@ const cors = require("cors");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
+const AWS = require("aws-sdk");
+const multerS3 = require("multer-s3");
 const path = require("path");
-const fs = require("fs");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const JWT_SECRET = "your_jwt_secret_key";
 
-// Ensure uploads directory exists
-if (!fs.existsSync("uploads")) {
-  fs.mkdirSync("uploads");
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
+// Настройка S3 для Timeweb Cloud
+const s3 = new AWS.S3({
+  accessKeyId: "DN1NLZTORA2L6NZ529JJ",
+  secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
+  endpoint: "https://s3.twcstorage.ru",
+  s3ForcePathStyle: true,
+  region: "ru-1",
 });
-const upload = multer({ storage });
+
+// Настройка multer для загрузки в S3
+const upload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", // Правильное имя бакета
+    acl: "public-read", // Делаем файлы публично доступными
+    key: (req, file, cb) => {
+      cb(null, Date.now() + path.extname(file.originalname));
+    },
+  }),
+});
 
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
@@ -383,10 +393,9 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
 
 app.post("/products", authenticateToken, upload.single("image"), async (req, res) => {
   const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const image = req.file?.filename;
+  const imageUrl = req.file?.location; // URL изображения в S3
 
-  if (!name || !branchId || !categoryId || !image) {
-    if (req.file) fs.unlinkSync(req.file.path);
+  if (!name || !branchId || !categoryId || !imageUrl) {
     return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
   }
 
@@ -406,7 +415,7 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
         branchId,
         categoryId,
         subCategoryId || null,
-        image,
+        imageUrl,
       ]
     );
 
@@ -427,7 +436,6 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
 
     res.status(201).json(newProduct[0]);
   } catch (err) {
-    if (req.file) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -435,16 +443,15 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
 app.put("/products/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
   const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const image = req.file?.filename;
+  const imageUrl = req.file?.location;
 
   try {
     const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (existing.length === 0) {
-      if (image) fs.unlinkSync(req.file.path);
       return res.status(404).json({ error: "Продукт не найден" });
     }
 
-    const updateImage = image || existing[0].image;
+    const updateImage = imageUrl || existing[0].image;
 
     await db.query(
       `UPDATE products SET 
@@ -466,12 +473,10 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
       ]
     );
 
-    if (image && existing[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления старого изображения:", err);
-      }
+    // Удаление старого изображения из S3, если загружено новое
+    if (imageUrl && existing[0].image) {
+      const oldKey = existing[0].image.split("/").pop();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
     }
 
     const [updatedProduct] = await db.query(
@@ -491,7 +496,6 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
 
     res.json(updatedProduct[0]);
   } catch (err) {
-    if (image) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -502,12 +506,10 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     const [product] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
 
+    // Удаление изображения из S3
     if (product[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", product[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления изображения:", err);
-      }
+      const key = product[0].image.split("/").pop();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
     }
 
     await db.query("DELETE FROM products WHERE id = ?", [id]);
@@ -553,43 +555,38 @@ app.delete("/discounts/:id", authenticateToken, async (req, res) => {
 });
 
 app.post("/stories", authenticateToken, upload.single("image"), async (req, res) => {
-  const image = req.file?.filename;
-  if (!image) return res.status(400).json({ error: "Изображение обязательно" });
+  const imageUrl = req.file?.location;
+  if (!imageUrl) return res.status(400).json({ error: "Изображение обязательно" });
 
   try {
-    const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [image]);
-    res.status(201).json({ id: result.insertId, image });
+    const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
+    res.status(201).json({ id: result.insertId, image: imageUrl });
   } catch (err) {
-    if (req.file) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
 
 app.put("/stories/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
-  const image = req.file?.filename;
+  const imageUrl = req.file?.location;
 
   try {
     const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (existing.length === 0) {
-      if (image) fs.unlinkSync(req.file.path);
       return res.status(404).json({ error: "История не найдена" });
     }
 
-    const updateImage = image || existing[0].image;
+    const updateImage = imageUrl || existing[0].image;
     await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
 
-    if (image && existing[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления старого изображения:", err);
-      }
+    // Удаление старого изображения из S3, если загружено новое
+    if (imageUrl && existing[0].image) {
+      const oldKey = existing[0].image.split("/").pop();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
     }
 
     res.json({ id, image: updateImage });
   } catch (err) {
-    if (image) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -600,12 +597,10 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
+    // Удаление изображения из S3
     if (story[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", story[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления изображения:", err);
-      }
+      const key = story[0].image.split("/").pop();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
     }
 
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
@@ -665,4 +660,6 @@ app.post("/login", async (req, res) => {
   }
 });
 
-app.listen(5000, () => console.log("Server running on port 5000"));
+// Используем переменную окружения PORT, предоставляемую Timeweb Cloud
+const port = process.env.PORT || 5000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
