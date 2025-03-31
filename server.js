@@ -5,25 +5,46 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
+const AWS = require("aws-sdk");
+const multerS3 = require("multer-s3");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const JWT_SECRET = "your_jwt_secret_key";
 
-// Ensure uploads directory exists
-if (!fs.existsSync("uploads")) {
-  fs.mkdirSync("uploads");
-}
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, "uploads/"),
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
+// Настройка S3 для Timeweb Cloud
+const s3 = new AWS.S3({
+  accessKeyId: "DN1NLZTORA2L6NZ529JJ",
+  secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
+  endpoint: "https://s3.twcstorage.ru",
+  s3ForcePathStyle: true,
+  region: "ru-1",
 });
-const upload = multer({ storage });
+
+// Настройка multer для загрузки в S3
+const upload = multer({
+  storage: multerS3({
+    s3: s3,
+    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75",
+    acl: "public-read",
+    key: (req, file, cb) => {
+      cb(null, Date.now() + path.extname(file.originalname));
+    },
+  }),
+  limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение размера файла (5MB)
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png|gif/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) {
+      return cb(null, true);
+    } else {
+      cb(new Error("Только изображения (jpeg, jpg, png, gif) разрешены!"));
+    }
+  },
+}).single("image");
 
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
@@ -381,119 +402,133 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/products", authenticateToken, upload.single("image"), async (req, res) => {
-  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const image = req.file?.filename;
+app.post("/products", authenticateToken, (req, res) => {
+  upload(req, res, async (err) => {
+    if (err) {
+      console.error("Ошибка загрузки изображения:", err.message);
+      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
+    }
 
-  if (!name || !branchId || !categoryId || !image) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
-  }
+    const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
+    const imageUrl = req.file?.location; // URL изображения в S3
 
-  try {
-    const [result] = await db.query(
-      `INSERT INTO products (
-        name, description, price_small, price_medium, price_large, price_single, 
-        branch_id, category_id, sub_category_id, image
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        name,
-        description || null,
-        priceSmall ? parseFloat(priceSmall) : null,
-        priceMedium ? parseFloat(priceMedium) : null,
-        priceLarge ? parseFloat(priceLarge) : null,
-        priceSingle ? parseFloat(priceSingle) : null,
-        branchId,
-        categoryId,
-        subCategoryId || null,
-        image,
-      ]
-    );
+    if (!name || !branchId || !categoryId || !imageUrl) {
+      return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
+    }
 
-    const [newProduct] = await db.query(
-      `
-      SELECT p.*, 
-             b.name as branch_name, 
-             c.name as category_name,
-             s.name as subcategory_name
-      FROM products p
-      LEFT JOIN branches b ON p.branch_id = b.id
-      LEFT JOIN categories c ON p.category_id = c.id
-      LEFT JOIN subcategories s ON p.sub_category_id = s.id
-      WHERE p.id = ?
-    `,
-      [result.insertId]
-    );
+    try {
+      const [result] = await db.query(
+        `INSERT INTO products (
+          name, description, price_small, price_medium, price_large, price_single, 
+          branch_id, category_id, sub_category_id, image
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          name,
+          description || null,
+          priceSmall ? parseFloat(priceSmall) : null,
+          priceMedium ? parseFloat(priceMedium) : null,
+          priceLarge ? parseFloat(priceLarge) : null,
+          priceSingle ? parseFloat(priceSingle) : null,
+          branchId,
+          categoryId,
+          subCategoryId || null,
+          imageUrl,
+        ]
+      );
 
-    res.status(201).json(newProduct[0]);
-  } catch (err) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
+      const [newProduct] = await db.query(
+        `
+        SELECT p.*, 
+               b.name as branch_name, 
+               c.name as category_name,
+               s.name as subcategory_name
+        FROM products p
+        LEFT JOIN branches b ON p.branch_id = b.id
+        LEFT JOIN categories c ON p.category_id = c.id
+        LEFT JOIN subcategories s ON p.sub_category_id = s.id
+        WHERE p.id = ?
+      `,
+        [result.insertId]
+      );
+
+      res.status(201).json(newProduct[0]);
+    } catch (err) {
+      console.error("Ошибка при добавлении продукта:", err.message);
+      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    }
+  });
 });
 
-app.put("/products/:id", authenticateToken, upload.single("image"), async (req, res) => {
-  const { id } = req.params;
-  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const image = req.file?.filename;
-
-  try {
-    const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
-    if (existing.length === 0) {
-      if (image) fs.unlinkSync(req.file.path);
-      return res.status(404).json({ error: "Продукт не найден" });
+app.put("/products/:id", authenticateToken, (req, res) => {
+  upload(req, res, async (err) => {
+    if (err) {
+      console.error("Ошибка загрузки изображения:", err.message);
+      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
-    const updateImage = image || existing[0].image;
+    const { id } = req.params;
+    const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
+    const imageUrl = req.file?.location;
 
-    await db.query(
-      `UPDATE products SET 
-        name = ?, description = ?, price_small = ?, price_medium = ?, price_large = ?, 
-        price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, image = ? 
-      WHERE id = ?`,
-      [
-        name,
-        description || null,
-        priceSmall ? parseFloat(priceSmall) : null,
-        priceMedium ? parseFloat(priceMedium) : null,
-        priceLarge ? parseFloat(priceLarge) : null,
-        priceSingle ? parseFloat(priceSingle) : null,
-        branchId,
-        categoryId,
-        subCategoryId || null,
-        updateImage,
-        id,
-      ]
-    );
-
-    if (image && existing[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления старого изображения:", err);
+    try {
+      const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "Продукт не найден" });
       }
+
+      const updateImage = imageUrl || existing[0].image;
+
+      await db.query(
+        `UPDATE products SET 
+          name = ?, description = ?, price_small = ?, price_medium = ?, price_large = ?, 
+          price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, image = ? 
+        WHERE id = ?`,
+        [
+          name,
+          description || null,
+          priceSmall ? parseFloat(priceSmall) : null,
+          priceMedium ? parseFloat(priceMedium) : null,
+          priceLarge ? parseFloat(priceLarge) : null,
+          priceSingle ? parseFloat(priceSingle) : null,
+          branchId,
+          categoryId,
+          subCategoryId || null,
+          updateImage,
+          id,
+        ]
+      );
+
+      // Удаление старого изображения из S3, если загружено новое
+      if (imageUrl && existing[0].image) {
+        try {
+          const oldKey = existing[0].image.split("/").pop();
+          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+        } catch (deleteErr) {
+          console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
+        }
+      }
+
+      const [updatedProduct] = await db.query(
+        `
+        SELECT p.*, 
+               b.name as branch_name, 
+               c.name as category_name,
+               s.name as subcategory_name
+        FROM products p
+        LEFT JOIN branches b ON p.branch_id = b.id
+        LEFT JOIN categories c ON p.category_id = c.id
+        LEFT JOIN subcategories s ON p.sub_category_id = s.id
+        WHERE p.id = ?
+      `,
+        [id]
+      );
+
+      res.json(updatedProduct[0]);
+    } catch (err) {
+      console.error("Ошибка при обновлении продукта:", err.message);
+      res.status(500).json({ error: "Ошибка сервера: " + err.message });
     }
-
-    const [updatedProduct] = await db.query(
-      `
-      SELECT p.*, 
-             b.name as branch_name, 
-             c.name as category_name,
-             s.name as subcategory_name
-      FROM products p
-      LEFT JOIN branches b ON p.branch_id = b.id
-      LEFT JOIN categories c ON p.category_id = c.id
-      LEFT JOIN subcategories s ON p.sub_category_id = s.id
-      WHERE p.id = ?
-    `,
-      [id]
-    );
-
-    res.json(updatedProduct[0]);
-  } catch (err) {
-    if (image) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
+  });
 });
 
 app.delete("/products/:id", authenticateToken, async (req, res) => {
@@ -502,17 +537,20 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     const [product] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
 
+    // Удаление изображения из S3
     if (product[0].image) {
       try {
-        fs.unlinkSync(path.join(__dirname, "uploads", product[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления изображения:", err);
+        const key = product[0].image.split("/").pop();
+        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+      } catch (deleteErr) {
+        console.error("Ошибка удаления изображения из S3:", deleteErr.message);
       }
     }
 
     await db.query("DELETE FROM products WHERE id = ?", [id]);
     res.json({ message: "Продукт удален" });
   } catch (err) {
+    console.error("Ошибка при удалении продукта:", err.message);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -552,46 +590,61 @@ app.delete("/discounts/:id", authenticateToken, async (req, res) => {
   }
 });
 
-app.post("/stories", authenticateToken, upload.single("image"), async (req, res) => {
-  const image = req.file?.filename;
-  if (!image) return res.status(400).json({ error: "Изображение обязательно" });
+app.post("/stories", authenticateToken, (req, res) => {
+  upload(req, res, async (err) => {
+    if (err) {
+      console.error("Ошибка загрузки изображения:", err.message);
+      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
+    }
 
-  try {
-    const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [image]);
-    res.status(201).json({ id: result.insertId, image });
-  } catch (err) {
-    if (req.file) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
+    const imageUrl = req.file?.location;
+    if (!imageUrl) return res.status(400).json({ error: "Изображение обязательно" });
+
+    try {
+      const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
+      res.status(201).json({ id: result.insertId, image: imageUrl });
+    } catch (err) {
+      console.error("Ошибка при добавлении истории:", err.message);
+      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    }
+  });
 });
 
-app.put("/stories/:id", authenticateToken, upload.single("image"), async (req, res) => {
-  const { id } = req.params;
-  const image = req.file?.filename;
-
-  try {
-    const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
-    if (existing.length === 0) {
-      if (image) fs.unlinkSync(req.file.path);
-      return res.status(404).json({ error: "История не найдена" });
+app.put("/stories/:id", authenticateToken, (req, res) => {
+  upload(req, res, async (err) => {
+    if (err) {
+      console.error("Ошибка загрузки изображения:", err.message);
+      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
-    const updateImage = image || existing[0].image;
-    await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
+    const { id } = req.params;
+    const imageUrl = req.file?.location;
 
-    if (image && existing[0].image) {
-      try {
-        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления старого изображения:", err);
+    try {
+      const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
+      if (existing.length === 0) {
+        return res.status(404).json({ error: "История не найдена" });
       }
-    }
 
-    res.json({ id, image: updateImage });
-  } catch (err) {
-    if (image) fs.unlinkSync(req.file.path);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
+      const updateImage = imageUrl || existing[0].image;
+      await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
+
+      // Удаление старого изображения из S3, если загружено новое
+      if (imageUrl && existing[0].image) {
+        try {
+          const oldKey = existing[0].image.split("/").pop();
+          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+        } catch (deleteErr) {
+          console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
+        }
+      }
+
+      res.json({ id, image: updateImage });
+    } catch (err) {
+      console.error("Ошибка при обновлении истории:", err.message);
+      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    }
+  });
 });
 
 app.delete("/stories/:id", authenticateToken, async (req, res) => {
@@ -600,17 +653,20 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
+    // Удаление изображения из S3
     if (story[0].image) {
       try {
-        fs.unlinkSync(path.join(__dirname, "uploads", story[0].image));
-      } catch (err) {
-        console.error("Ошибка удаления изображения:", err);
+        const key = story[0].image.split("/").pop();
+        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+      } catch (deleteErr) {
+        console.error("Ошибка удаления изображения из S3:", deleteErr.message);
       }
     }
 
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
     res.json({ message: "История удалена" });
   } catch (err) {
+    console.error("Ошибка при удалении истории:", err.message);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
