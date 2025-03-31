@@ -37,32 +37,21 @@ s3.listBuckets((err, data) => {
     console.log("Успешное подключение к S3, доступные бакеты:", data.Buckets);
   }
 });
-
-// Настройка multer для загрузки в S3
 const upload = multer({
   storage: multerS3({
     s3: s3,
     bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75",
     acl: "public-read",
+    contentType: multerS3.AUTO_CONTENT_TYPE,
     metadata: (req, file, cb) => {
       cb(null, { fieldName: file.fieldname });
     },
     key: (req, file, cb) => {
-      cb(null, Date.now() + path.extname(file.originalname));
+      cb(null, `${Date.now()}-${file.originalname}`);
     },
   }),
-  limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение размера файла (5MB)
-  fileFilter: (req, file, cb) => {
-    const filetypes = /jpeg|jpg|png|gif/;
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = filetypes.test(file.mimetype);
-    if (extname && mimetype) {
-      return cb(null, true);
-    } else {
-      cb(new Error("Только изображения (jpeg, jpg, png, gif) разрешены!"));
-    }
-  },
-}).single("image");
+});
+
 
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
