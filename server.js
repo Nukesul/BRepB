@@ -12,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const JWT_SECRET = "your_jwt_secret_key";
+const JWT_SECRET = "your_jwt_secret_key"; // Секретный ключ для JWT
 
 const { S3Client } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
@@ -22,12 +22,10 @@ const s3 = new S3Client({
     accessKeyId: "DN1NLZTORA2L6NZ529JJ",
     secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
   },
-  endpoint: "https://s3.twcstorage.ru", // Исправленный endpoint
+  endpoint: "https://s3.twcstorage.ru",
   forcePathStyle: true,
   region: "ru-1",
 });
-
-
 
 // Проверка подключения к S3 при старте
 s3.listBuckets((err, data) => {
@@ -37,6 +35,7 @@ s3.listBuckets((err, data) => {
     console.log("Успешное подключение к S3, доступные бакеты:", data.Buckets);
   }
 });
+
 const upload = multer({
   storage: multerS3({
     s3: s3,
@@ -52,7 +51,6 @@ const upload = multer({
   }),
 });
 
-
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
   user: "ch79145_boodai",
@@ -60,6 +58,7 @@ const db = mysql.createPool({
   database: "ch79145_boodai",
 });
 
+// Middleware для проверки токена
 const authenticateToken = (req, res, next) => {
   const token = req.headers["authorization"]?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Токен отсутствует" });
@@ -70,8 +69,10 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Инициализация приложения
 (async () => {
   try {
+    // Подключение к MySQL
     const connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
@@ -135,13 +136,21 @@ const authenticateToken = (req, res, next) => {
     }
 
     connection.release();
+    console.log("Инициализация базы данных завершена");
+
+    // Запуск сервера после успешной инициализации
+    const PORT = process.env.PORT || 5000; // Используем переменную окружения или 5000 по умолчанию
+    app.listen(PORT, () => console.log(`Сервер запущен на порту ${PORT}`));
   } catch (err) {
-    console.error("Ошибка инициализации:", err.message);
+    console.error("Ошибка инициализации приложения:", err.message);
+    process.exit(1); // Завершаем процесс с ошибкой, чтобы система развертывания знала о проблеме
   }
 })();
 
+// Основной маршрут
 app.get("/", (req, res) => res.send("Booday Pizza API"));
 
+// Авторизация админа
 app.post("/admin/login", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: "Введите email и пароль" });
@@ -506,7 +515,6 @@ app.put("/products/:id", authenticateToken, (req, res) => {
         ]
       );
 
-      // Удаление старого изображения из S3, если загружено новое
       if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
@@ -546,7 +554,6 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     const [product] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
 
-    // Удаление изображения из S3
     if (product[0].image) {
       try {
         const key = product[0].image.split("/").pop();
@@ -639,7 +646,6 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
       const updateImage = imageUrl || existing[0].image;
       await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
 
-      // Удаление старого изображения из S3, если загружено новое
       if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
@@ -664,7 +670,6 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
-    // Удаление изображения S3
     if (story[0].image) {
       try {
         const key = story[0].image.split("/").pop();
@@ -732,5 +737,3 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
-
-app.listen(5000, () => console.log("Server running on port 5000"));
