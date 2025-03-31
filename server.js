@@ -26,7 +26,7 @@ const s3 = new AWS.S3({
 const upload = multer({
   storage: multerS3({
     s3: s3,
-    bucket: "wj55416:swift", // Уточните имя бакета, если это не так
+    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", // Правильное имя бакета
     acl: "public-read", // Делаем файлы публично доступными
     key: (req, file, cb) => {
       cb(null, Date.now() + path.extname(file.originalname));
@@ -475,7 +475,7 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
     // Удаление старого изображения из S3, если загружено новое
     if (imageUrl && existing[0].image) {
       const oldKey = existing[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "wj55416:swift", Key: oldKey }).promise();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
     }
 
     const [updatedProduct] = await db.query(
@@ -508,7 +508,7 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     // Удаление изображения из S3
     if (product[0].image) {
       const key = product[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "wj55416:swift", Key: key }).promise();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
     }
 
     await db.query("DELETE FROM products WHERE id = ?", [id]);
@@ -581,7 +581,7 @@ app.put("/stories/:id", authenticateToken, upload.single("image"), async (req, r
     // Удаление старого изображения из S3, если загружено новое
     if (imageUrl && existing[0].image) {
       const oldKey = existing[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "wj55416:swift", Key: oldKey }).promise();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
     }
 
     res.json({ id, image: updateImage });
@@ -599,7 +599,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     // Удаление изображения из S3
     if (story[0].image) {
       const key = story[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "wj55416:swift", Key: key }).promise();
+      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
     }
 
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
