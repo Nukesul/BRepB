@@ -5,35 +5,25 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
-const AWS = require("aws-sdk");
-const multerS3 = require("multer-s3");
+const fs = require("fs");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 const JWT_SECRET = "your_jwt_secret_key";
 
-// Настройка S3 для Timeweb Cloud
-const s3 = new AWS.S3({
-  accessKeyId: "DN1NLZTORA2L6NZ529JJ",
-  secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
-  endpoint: "https://s3.twcstorage.ru",
-  s3ForcePathStyle: true,
-  region: "ru-1",
-});
+// Ensure uploads directory exists
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
 
-// Настройка multer для загрузки в S3
-const upload = multer({
-  storage: multerS3({
-    s3: s3,
-    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75",
-    acl: "public-read",
-    key: (req, file, cb) => {
-      cb(null, Date.now() + path.extname(file.originalname));
-    },
-  }),
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, "uploads/"),
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname)),
 });
+const upload = multer({ storage });
 
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
@@ -393,9 +383,10 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
 
 app.post("/products", authenticateToken, upload.single("image"), async (req, res) => {
   const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const imageUrl = req.file?.location; // URL изображения в S3
+  const image = req.file?.filename;
 
-  if (!name || !branchId || !categoryId || !imageUrl) {
+  if (!name || !branchId || !categoryId || !image) {
+    if (req.file) fs.unlinkSync(req.file.path);
     return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
   }
 
@@ -415,7 +406,7 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
         branchId,
         categoryId,
         subCategoryId || null,
-        imageUrl,
+        image,
       ]
     );
 
@@ -436,6 +427,7 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
 
     res.status(201).json(newProduct[0]);
   } catch (err) {
+    if (req.file) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -443,15 +435,16 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
 app.put("/products/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
   const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-  const imageUrl = req.file?.location;
+  const image = req.file?.filename;
 
   try {
     const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (existing.length === 0) {
+      if (image) fs.unlinkSync(req.file.path);
       return res.status(404).json({ error: "Продукт не найден" });
     }
 
-    const updateImage = imageUrl || existing[0].image;
+    const updateImage = image || existing[0].image;
 
     await db.query(
       `UPDATE products SET 
@@ -473,10 +466,12 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
       ]
     );
 
-    // Удаление старого изображения из S3, если загружено новое
-    if (imageUrl && existing[0].image) {
-      const oldKey = existing[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+    if (image && existing[0].image) {
+      try {
+        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
+      } catch (err) {
+        console.error("Ошибка удаления старого изображения:", err);
+      }
     }
 
     const [updatedProduct] = await db.query(
@@ -496,6 +491,7 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
 
     res.json(updatedProduct[0]);
   } catch (err) {
+    if (image) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -506,10 +502,12 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     const [product] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
     if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
 
-    // Удаление изображения из S3
     if (product[0].image) {
-      const key = product[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+      try {
+        fs.unlinkSync(path.join(__dirname, "uploads", product[0].image));
+      } catch (err) {
+        console.error("Ошибка удаления изображения:", err);
+      }
     }
 
     await db.query("DELETE FROM products WHERE id = ?", [id]);
@@ -555,38 +553,43 @@ app.delete("/discounts/:id", authenticateToken, async (req, res) => {
 });
 
 app.post("/stories", authenticateToken, upload.single("image"), async (req, res) => {
-  const imageUrl = req.file?.location;
-  if (!imageUrl) return res.status(400).json({ error: "Изображение обязательно" });
+  const image = req.file?.filename;
+  if (!image) return res.status(400).json({ error: "Изображение обязательно" });
 
   try {
-    const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
-    res.status(201).json({ id: result.insertId, image: imageUrl });
+    const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [image]);
+    res.status(201).json({ id: result.insertId, image });
   } catch (err) {
+    if (req.file) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
 
 app.put("/stories/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
-  const imageUrl = req.file?.location;
+  const image = req.file?.filename;
 
   try {
     const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (existing.length === 0) {
+      if (image) fs.unlinkSync(req.file.path);
       return res.status(404).json({ error: "История не найдена" });
     }
 
-    const updateImage = imageUrl || existing[0].image;
+    const updateImage = image || existing[0].image;
     await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
 
-    // Удаление старого изображения из S3, если загружено новое
-    if (imageUrl && existing[0].image) {
-      const oldKey = existing[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+    if (image && existing[0].image) {
+      try {
+        fs.unlinkSync(path.join(__dirname, "uploads", existing[0].image));
+      } catch (err) {
+        console.error("Ошибка удаления старого изображения:", err);
+      }
     }
 
     res.json({ id, image: updateImage });
   } catch (err) {
+    if (image) fs.unlinkSync(req.file.path);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -597,10 +600,12 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
-    // Удаление изображения из S3
     if (story[0].image) {
-      const key = story[0].image.split("/").pop();
-      await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+      try {
+        fs.unlinkSync(path.join(__dirname, "uploads", story[0].image));
+      } catch (err) {
+        console.error("Ошибка удаления изображения:", err);
+      }
     }
 
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
