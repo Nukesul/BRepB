@@ -26,10 +26,10 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 const db = mysql.createPool({
-  host: "localhost",
-  user: "root",
-  password: "root",
-  database: "booday_pizza",
+  host: "vh438.timeweb.ru",
+  user: "ch79145_boodai",
+  password: "16162007",
+  database: "ch79145_boodai",
 });
 
 const authenticateToken = (req, res, next) => {
