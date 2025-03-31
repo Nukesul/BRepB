@@ -47,14 +47,14 @@ const authenticateToken = (req, res, next) => {
     const connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
-    // Check if branches table has address and phone columns
+    // Проверка и создание таблицы branches
     const [branchColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'address'");
     if (branchColumns.length === 0) {
       await connection.query("ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)");
       console.log("Добавлены колонки address и phone в таблицу branches");
     }
 
-    // Check if products table has all required columns
+    // Проверка и создание таблицы products
     const [productColumns] = await connection.query("SHOW COLUMNS FROM products");
     const columns = productColumns.map((col) => col.Field);
 
@@ -73,7 +73,7 @@ const authenticateToken = (req, res, next) => {
       console.log("Добавлена колонка is_pizza в таблицу products");
     }
 
-    // Create subcategories table if not exists
+    // Создание таблицы subcategories, если не существует
     await connection.query(`
       CREATE TABLE IF NOT EXISTS subcategories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -83,6 +83,18 @@ const authenticateToken = (req, res, next) => {
       )
     `);
 
+    // Создание таблицы promo_codes, если не существует
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS promo_codes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        code VARCHAR(50) NOT NULL UNIQUE,
+        discount_percent INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("Таблица promo_codes проверена/создана");
+
+    // Проверка и создание админа
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -91,6 +103,7 @@ const authenticateToken = (req, res, next) => {
     } else {
       console.log("Админ уже существует:", "admin@boodaypizza.com");
     }
+
     connection.release();
   } catch (err) {
     console.error("Ошибка инициализации:", err.message);
@@ -118,7 +131,7 @@ app.post("/admin/login", async (req, res) => {
   }
 });
 
-// Общедоступные маршруты (без авторизации)
+// Общедоступные маршруты
 app.get("/branches", async (req, res) => {
   try {
     const [branches] = await db.query("SELECT * FROM branches");
@@ -177,7 +190,65 @@ app.get("/categories", async (req, res) => {
   }
 });
 
-// Админские маршруты (с авторизацией)
+// Маршруты для промокодов (общедоступный GET для проверки промокода клиентом)
+app.get("/promo-codes", authenticateToken, async (req, res) => {
+  try {
+    const [promoCodes] = await db.query("SELECT * FROM promo_codes");
+    res.json(promoCodes);
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+// Проверка промокода (общедоступный маршрут для клиентов)
+app.get("/promo-codes/check/:code", async (req, res) => {
+  const { code } = req.params;
+  try {
+    const [promo] = await db.query("SELECT * FROM promo_codes WHERE code = ?", [code]);
+    if (promo.length === 0) return res.status(404).json({ error: "Промокод не найден" });
+    res.json(promo[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+// Админские маршруты для промокодов
+app.post("/promo-codes", authenticateToken, async (req, res) => {
+  const { code, discountPercent } = req.body;
+  if (!code || !discountPercent) return res.status(400).json({ error: "Код и процент скидки обязательны" });
+
+  try {
+    const [result] = await db.query("INSERT INTO promo_codes (code, discount_percent) VALUES (?, ?)", [code, discountPercent]);
+    res.status(201).json({ id: result.insertId, code, discount_percent: discountPercent });
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+app.put("/promo-codes/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { code, discountPercent } = req.body;
+  if (!code || !discountPercent) return res.status(400).json({ error: "Код и процент скидки обязательны" });
+
+  try {
+    await db.query("UPDATE promo_codes SET code = ?, discount_percent = ? WHERE id = ?", [code, discountPercent, id]);
+    res.json({ id, code, discount_percent: discountPercent });
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+app.delete("/promo-codes/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query("DELETE FROM promo_codes WHERE id = ?", [id]);
+    res.json({ message: "Промокод удален" });
+  } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+// Остальные админские маршруты
 app.post("/branches", authenticateToken, async (req, res) => {
   const { name, address, phone } = req.body;
   if (!name) return res.status(400).json({ error: "Название филиала обязательно" });
@@ -490,59 +561,6 @@ app.post("/stories", authenticateToken, upload.single("image"), async (req, res)
   }
 });
 
-
-// Регистрация пользователя
-// Регистрация пользователя
-app.post("/register", async (req, res) => {
-  const { name, email, password } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: "Все поля обязательны" });
-  }
-
-  try {
-    const [existingUsers] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (existingUsers.length > 0) {
-      return res.status(400).json({ error: "Пользователь с таким email уже существует" });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const [result] = await db.query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", [name, email, hashedPassword]);
-    const token = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: "1h" });
-    res.status(201).json({ token, user: { id: result.insertId, name, email } });
-  } catch (err) {
-    console.error("Ошибка при регистрации:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
-});
-
-// Вход пользователя
-// Вход пользователя
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: "Введите email и пароль" });
-  }
-
-  try {
-    const [users] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (users.length === 0) {
-      return res.status(401).json({ error: "Неверный email или пароль" });
-    }
-
-    const user = users[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ error: "Неверный email или пароль" });
-    }
-
-    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
-  } catch (err) {
-    console.error("Ошибка при входе:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
-});
-
 app.put("/stories/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
   const image = req.file?.filename;
@@ -589,6 +607,56 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
     res.json({ message: "История удалена" });
   } catch (err) {
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+// Регистрация пользователя
+app.post("/register", async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: "Все поля обязательны" });
+  }
+
+  try {
+    const [existingUsers] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
+    if (existingUsers.length > 0) {
+      return res.status(400).json({ error: "Пользователь с таким email уже существует" });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const [result] = await db.query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", [name, email, hashedPassword]);
+    const token = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: "1h" });
+    res.status(201).json({ token, user: { id: result.insertId, name, email } });
+  } catch (err) {
+    console.error("Ошибка при регистрации:", err.message);
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+// Вход пользователя
+app.post("/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) {
+    return res.status(400).json({ error: "Введите email и пароль" });
+  }
+
+  try {
+    const [users] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
+    if (users.length === 0) {
+      return res.status(401).json({ error: "Неверный email или пароль" });
+    }
+
+    const user = users[0];
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Неверный email или пароль" });
+    }
+
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
+  } catch (err) {
+    console.error("Ошибка при входе:", err.message);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
