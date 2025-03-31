@@ -89,6 +89,8 @@ const authenticateToken = (req, res, next) => {
         id INT AUTO_INCREMENT PRIMARY KEY,
         code VARCHAR(50) NOT NULL UNIQUE,
         discount_percent INT NOT NULL,
+        expires_at TIMESTAMP NULL DEFAULT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -190,7 +192,7 @@ app.get("/categories", async (req, res) => {
   }
 });
 
-// Маршруты для промокодов (общедоступный GET для проверки промокода клиентом)
+// Маршруты для промокодов
 app.get("/promo-codes", authenticateToken, async (req, res) => {
   try {
     const [promoCodes] = await db.query("SELECT * FROM promo_codes");
@@ -200,26 +202,27 @@ app.get("/promo-codes", authenticateToken, async (req, res) => {
   }
 });
 
-// Проверка промокода (общедоступный маршрут для клиентов)
 app.get("/promo-codes/check/:code", async (req, res) => {
   const { code } = req.params;
   try {
-    const [promo] = await db.query("SELECT * FROM promo_codes WHERE code = ?", [code]);
-    if (promo.length === 0) return res.status(404).json({ error: "Промокод не найден" });
+    const [promo] = await db.query("SELECT * FROM promo_codes WHERE code = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())", [code]);
+    if (promo.length === 0) return res.status(404).json({ error: "Промокод не найден или недействителен" });
     res.json(promo[0]);
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
 
-// Админские маршруты для промокодов
 app.post("/promo-codes", authenticateToken, async (req, res) => {
-  const { code, discountPercent } = req.body;
+  const { code, discountPercent, expiresAt, isActive } = req.body;
   if (!code || !discountPercent) return res.status(400).json({ error: "Код и процент скидки обязательны" });
 
   try {
-    const [result] = await db.query("INSERT INTO promo_codes (code, discount_percent) VALUES (?, ?)", [code, discountPercent]);
-    res.status(201).json({ id: result.insertId, code, discount_percent: discountPercent });
+    const [result] = await db.query(
+      "INSERT INTO promo_codes (code, discount_percent, expires_at, is_active) VALUES (?, ?, ?, ?)",
+      [code, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true]
+    );
+    res.status(201).json({ id: result.insertId, code, discount_percent: discountPercent, expires_at: expiresAt || null, is_active: isActive !== undefined ? isActive : true });
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -227,12 +230,15 @@ app.post("/promo-codes", authenticateToken, async (req, res) => {
 
 app.put("/promo-codes/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { code, discountPercent } = req.body;
+  const { code, discountPercent, expiresAt, isActive } = req.body;
   if (!code || !discountPercent) return res.status(400).json({ error: "Код и процент скидки обязательны" });
 
   try {
-    await db.query("UPDATE promo_codes SET code = ?, discount_percent = ? WHERE id = ?", [code, discountPercent, id]);
-    res.json({ id, code, discount_percent: discountPercent });
+    await db.query(
+      "UPDATE promo_codes SET code = ?, discount_percent = ?, expires_at = ?, is_active = ? WHERE id = ?",
+      [code, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true, id]
+    );
+    res.json({ id, code, discount_percent: discountPercent, expires_at: expiresAt || null, is_active: isActive !== undefined ? isActive : true });
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -248,7 +254,7 @@ app.delete("/promo-codes/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Остальные админские маршруты
+// Админские маршруты
 app.post("/branches", authenticateToken, async (req, res) => {
   const { name, address, phone } = req.body;
   if (!name) return res.status(400).json({ error: "Название филиала обязательно" });
@@ -376,20 +382,20 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
 });
 
 app.post("/products", authenticateToken, upload.single("image"), async (req, res) => {
-  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, isPizza } = req.body;
+  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
   const image = req.file?.filename;
 
   if (!name || !branchId || !categoryId || !image) {
     if (req.file) fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: "Все обязательные поля должны быть заполнены" });
+    return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
   }
 
   try {
     const [result] = await db.query(
       `INSERT INTO products (
         name, description, price_small, price_medium, price_large, price_single, 
-        branch_id, category_id, sub_category_id, is_pizza, image
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        branch_id, category_id, sub_category_id, image
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         name,
         description || null,
@@ -400,7 +406,6 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
         branchId,
         categoryId,
         subCategoryId || null,
-        isPizza === "true" ? 1 : 0,
         image,
       ]
     );
@@ -429,7 +434,7 @@ app.post("/products", authenticateToken, upload.single("image"), async (req, res
 
 app.put("/products/:id", authenticateToken, upload.single("image"), async (req, res) => {
   const { id } = req.params;
-  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId, isPizza } = req.body;
+  const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
   const image = req.file?.filename;
 
   try {
@@ -444,7 +449,7 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
     await db.query(
       `UPDATE products SET 
         name = ?, description = ?, price_small = ?, price_medium = ?, price_large = ?, 
-        price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, is_pizza = ?, image = ? 
+        price_single = ?, branch_id = ?, category_id = ?, sub_category_id = ?, image = ? 
       WHERE id = ?`,
       [
         name,
@@ -456,7 +461,6 @@ app.put("/products/:id", authenticateToken, upload.single("image"), async (req, 
         branchId,
         categoryId,
         subCategoryId || null,
-        isPizza === "true" ? 1 : 0,
         updateImage,
         id,
       ]
