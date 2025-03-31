@@ -18,7 +18,7 @@ const JWT_SECRET = "your_jwt_secret_key";
 const s3 = new AWS.S3({
   accessKeyId: "DN1NLZTORA2L6NZ529JJ",
   secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
-  endpoint: "https://s3.timeweb.com", // Исправленный endpoint
+  endpoint: "https://s3.timeweb.cloud",
   s3ForcePathStyle: true,
   region: "ru-1",
 });
@@ -26,7 +26,7 @@ const s3 = new AWS.S3({
 // Проверка подключения к S3 при старте
 s3.listBuckets((err, data) => {
   if (err) {
-    console.error("Ошибка подключения к S3:", err.message);
+    console.error("Ошибка подключения к S3:", err.message, err.stack);
   } else {
     console.log("Успешное подключение к S3, доступные бакеты:", data.Buckets);
   }
@@ -38,6 +38,9 @@ const upload = multer({
     s3: s3,
     bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75",
     acl: "public-read",
+    metadata: (req, file, cb) => {
+      cb(null, { fieldName: file.fieldname });
+    },
     key: (req, file, cb) => {
       cb(null, Date.now() + path.extname(file.originalname));
     },
@@ -414,12 +417,12 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
 app.post("/products", authenticateToken, (req, res) => {
   upload(req, res, async (err) => {
     if (err) {
-      console.error("Ошибка загрузки изображения:", err.message, err.stack); // Добавлено err.stack для полной трассировки
+      console.error("Ошибка загрузки изображения:", err.message, err.stack);
       return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-    const imageUrl = req.file?.location; // URL изображения в S3
+    const imageUrl = req.file?.location;
 
     if (!name || !branchId || !categoryId || !imageUrl) {
       console.error("Отсутствуют обязательные поля:", { name, branchId, categoryId, imageUrl });
@@ -463,7 +466,7 @@ app.post("/products", authenticateToken, (req, res) => {
 
       res.status(201).json(newProduct[0]);
     } catch (err) {
-      console.error("Ошибка при добавлении продукта:", err.message, err.stack); // Добавлено err.stack
+      console.error("Ошибка при добавлении продукта:", err.message, err.stack);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
     }
   });
@@ -509,10 +512,11 @@ app.put("/products/:id", authenticateToken, (req, res) => {
       );
 
       // Удаление старого изображения из S3, если загружено новое
-      if (imageUrl && existing[0].image) {
+      if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
           await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+          console.log(`Старое изображение ${oldKey} удалено из S3`);
         } catch (deleteErr) {
           console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
         }
@@ -552,6 +556,7 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
       try {
         const key = product[0].image.split("/").pop();
         await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+        console.log(`Изображение ${key} удалено из S3`);
       } catch (deleteErr) {
         console.error("Ошибка удаления изображения из S3:", deleteErr.message);
       }
@@ -560,7 +565,7 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM products WHERE id = ?", [id]);
     res.json({ message: "Продукт удален" });
   } catch (err) {
-    console.error("Ошибка при удалении продукта:", err.message);
+    console.error("Ошибка при удалении продукта:", err.message, err.stack);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -603,7 +608,7 @@ app.delete("/discounts/:id", authenticateToken, async (req, res) => {
 app.post("/stories", authenticateToken, (req, res) => {
   upload(req, res, async (err) => {
     if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
+      console.error("Ошибка загрузки изображения:", err.message, err.stack);
       return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
@@ -614,7 +619,7 @@ app.post("/stories", authenticateToken, (req, res) => {
       const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
       res.status(201).json({ id: result.insertId, image: imageUrl });
     } catch (err) {
-      console.error("Ошибка при добавлении истории:", err.message);
+      console.error("Ошибка при добавлении истории:", err.message, err.stack);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
     }
   });
@@ -623,7 +628,7 @@ app.post("/stories", authenticateToken, (req, res) => {
 app.put("/stories/:id", authenticateToken, (req, res) => {
   upload(req, res, async (err) => {
     if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
+      console.error("Ошибка загрузки изображения:", err.message, err.stack);
       return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
@@ -640,10 +645,11 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
       await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
 
       // Удаление старого изображения из S3, если загружено новое
-      if (imageUrl && existing[0].image) {
+      if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
           await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+          console.log(`Старое изображение ${oldKey} удалено из S3`);
         } catch (deleteErr) {
           console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
         }
@@ -651,7 +657,7 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
 
       res.json({ id, image: updateImage });
     } catch (err) {
-      console.error("Ошибка при обновлении истории:", err.message);
+      console.error("Ошибка при обновлении истории:", err.message, err.stack);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
     }
   });
@@ -668,6 +674,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
       try {
         const key = story[0].image.split("/").pop();
         await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+        console.log(`Изображение ${key} удалено из S3`);
       } catch (deleteErr) {
         console.error("Ошибка удаления изображения из S3:", deleteErr.message);
       }
@@ -676,7 +683,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
     res.json({ message: "История удалена" });
   } catch (err) {
-    console.error("Ошибка при удалении истории:", err.message);
+    console.error("Ошибка при удалении истории:", err.message, err.stack);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -699,7 +706,7 @@ app.post("/register", async (req, res) => {
     const token = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: "1h" });
     res.status(201).json({ token, user: { id: result.insertId, name, email } });
   } catch (err) {
-    console.error("Ошибка при регистрации:", err.message);
+    console.error("Ошибка при регистрации:", err.message, err.stack);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
@@ -726,7 +733,7 @@ app.post("/login", async (req, res) => {
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
   } catch (err) {
-    console.error("Ошибка при входе:", err.message);
+    console.error("Ошибка при входе:", err.message, err.stack);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
