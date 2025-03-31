@@ -30,6 +30,8 @@ const db = mysql.createPool({
   user: "ch79145_boodai",
   password: "16162007",
   database: "ch79145_boodai",
+  port: 3306, // Добавлен порт по умолчанию для MySQL
+  connectionTimeout: 30000, // Увеличен тайм-аут до 30 секунд
 });
 
 const authenticateToken = (req, res, next) => {
@@ -93,7 +95,7 @@ const authenticateToken = (req, res, next) => {
     }
     connection.release();
   } catch (err) {
-    console.error("Ошибка инициализации:", err.message);
+    console.error("Ошибка инициализации:", err); // Улучшено логирование с полным объектом ошибки
   }
 })();
 
@@ -490,8 +492,6 @@ app.post("/stories", authenticateToken, upload.single("image"), async (req, res)
   }
 });
 
-
-// Регистрация пользователя
 // Регистрация пользователя
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
@@ -515,7 +515,6 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// Вход пользователя
 // Вход пользователя
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
