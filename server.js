@@ -14,14 +14,19 @@ app.use(express.json());
 
 const JWT_SECRET = "your_jwt_secret_key";
 
-// Настройка S3 для Timeweb Cloud
-const s3 = new AWS.S3({
-  accessKeyId: "DN1NLZTORA2L6NZ529JJ",
-  secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
-  endpoint: "https://s3.twcstorage.ru",  // исправленный endpoint
-  s3ForcePathStyle: true,
+const { S3Client } = require("@aws-sdk/client-s3");
+const { Upload } = require("@aws-sdk/lib-storage");
+
+const s3 = new S3Client({
+  credentials: {
+    accessKeyId: "DN1NLZTORA2L6NZ529JJ",
+    secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
+  },
+  endpoint: "https://s3.twcstorage.ru", // Исправленный endpoint
+  forcePathStyle: true,
   region: "ru-1",
 });
+
 
 
 // Проверка подключения к S3 при старте
@@ -37,7 +42,7 @@ s3.listBuckets((err, data) => {
 const upload = multer({
   storage: multerS3({
     s3: s3,
-    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75",
+    bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75",
     acl: "public-read",
     metadata: (req, file, cb) => {
       cb(null, { fieldName: file.fieldname });
@@ -516,7 +521,7 @@ app.put("/products/:id", authenticateToken, (req, res) => {
       if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
-          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75", Key: oldKey }).promise();
           console.log(`Старое изображение ${oldKey} удалено из S3`);
         } catch (deleteErr) {
           console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
@@ -556,7 +561,7 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     if (product[0].image) {
       try {
         const key = product[0].image.split("/").pop();
-        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75", Key: key }).promise();
         console.log(`Изображение ${key} удалено из S3`);
       } catch (deleteErr) {
         console.error("Ошибка удаления изображения из S3:", deleteErr.message);
@@ -649,7 +654,7 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
       if (imageUrl && existing[0].image && imageUrl !== existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
-          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: oldKey }).promise();
+          await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75", Key: oldKey }).promise();
           console.log(`Старое изображение ${oldKey} удалено из S3`);
         } catch (deleteErr) {
           console.error("Ошибка удаления старого изображения из S3:", deleteErr.message);
@@ -674,7 +679,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     if (story[0].image) {
       try {
         const key = story[0].image.split("/").pop();
-        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75", Key: key }).promise();
+        await s3.deleteObject({ Bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75", Key: key }).promise();
         console.log(`Изображение ${key} удалено из S3`);
       } catch (deleteErr) {
         console.error("Ошибка удаления изображения из S3:", deleteErr.message);
