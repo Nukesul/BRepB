@@ -675,7 +675,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
-    // Удаление изображения из S3
+    // Удаление изображения S3
     if (story[0].image) {
       try {
         const key = story[0].image.split("/").pop();
