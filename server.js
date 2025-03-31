@@ -18,10 +18,11 @@ const JWT_SECRET = "your_jwt_secret_key";
 const s3 = new AWS.S3({
   accessKeyId: "DN1NLZTORA2L6NZ529JJ",
   secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
-  endpoint: "https://s3.timeweb.cloud",
+  endpoint: "https://s3.twcstorage.ru",  // исправленный endpoint
   s3ForcePathStyle: true,
   region: "ru-1",
 });
+
 
 // Проверка подключения к S3 при старте
 s3.listBuckets((err, data) => {
