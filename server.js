@@ -13,6 +13,7 @@ app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = "your_jwt_secret_key";
+const PORT = 5000;
 
 // Настройка S3 для Timeweb Cloud
 const s3 = new AWS.S3({
@@ -30,52 +31,73 @@ const upload = multer({
     bucket: "4eeafbc6-4af2cd44-4c23-4530-a2bf-7508089dfdf75",
     acl: "public-read",
     key: (req, file, cb) => {
-      cb(null, Date.now() + path.extname(file.originalname));
+      cb(null, `${Date.now()}${path.extname(file.originalname)}`);
     },
   }),
-  limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение размера файла (5MB)
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (req, file, cb) => {
     const filetypes = /jpeg|jpg|png|gif/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
     if (extname && mimetype) {
-      return cb(null, true);
+      cb(null, true);
     } else {
       cb(new Error("Только изображения (jpeg, jpg, png, gif) разрешены!"));
     }
   },
 }).single("image");
 
+// Подключение к базе данных
 const db = mysql.createPool({
   host: "vh438.timeweb.ru",
   user: "ch79145_boodai",
   password: "16162007",
   database: "ch79145_boodai",
+  connectionLimit: 10,
 });
 
-const authenticateToken = (req, res, next) => {
-  const token = req.headers["authorization"]?.split(" ")[1];
+// Middleware для аутентификации
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Токен отсутствует" });
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.status(403).json({ error: "Недействительный токен" });
+
+  try {
+    const user = await jwt.verify(token, JWT_SECRET);
     req.user = user;
     next();
+  } catch (err) {
+    return res.status(403).json({ error: "Недействительный токен" });
+  }
+};
+
+// Обработка ошибок для multer
+const uploadHandler = (req, res, callback) => {
+  upload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: "Ошибка загрузки: " + err.message });
+    } else if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    callback(req, res);
   });
 };
 
-(async () => {
+// Инициализация базы данных
+const initializeDatabase = async () => {
+  let connection;
   try {
-    const connection = await db.getConnection();
+    connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
-    // Проверка и создание таблицы branches
+    await connection.beginTransaction();
+
     const [branchColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'address'");
-    if (branchColumns.length === 0) {
+    if (!branchColumns.length) {
       await connection.query("ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)");
       console.log("Добавлены колонки address и phone в таблицу branches");
     }
 
-    // Проверка и создание таблицы products
     const [productColumns] = await connection.query("SHOW COLUMNS FROM products");
     const columns = productColumns.map((col) => col.Field);
 
@@ -94,7 +116,6 @@ const authenticateToken = (req, res, next) => {
       console.log("Добавлена колонка is_pizza в таблицу products");
     }
 
-    // Создание таблицы subcategories, если не существует
     await connection.query(`
       CREATE TABLE IF NOT EXISTS subcategories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -104,7 +125,6 @@ const authenticateToken = (req, res, next) => {
       )
     `);
 
-    // Создание таблицы promo_codes, если не существует
     await connection.query(`
       CREATE TABLE IF NOT EXISTS promo_codes (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -117,22 +137,26 @@ const authenticateToken = (req, res, next) => {
     `);
     console.log("Таблица promo_codes проверена/создана");
 
-    // Проверка и создание админа
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
-    if (users.length === 0) {
+    if (!users.length) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
       await connection.query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", ["Admin", "admin@boodaypizza.com", hashedPassword]);
       console.log("Админ создан: admin@boodaypizza.com / admin123");
     } else {
-      console.log("Админ уже существует:", "admin@boodaypizza.com");
+      console.log("Админ уже существует: admin@boodaypizza.com");
     }
 
-    connection.release();
+    await connection.commit();
   } catch (err) {
+    if (connection) await connection.rollback();
     console.error("Ошибка инициализации:", err.message);
+    throw err;
+  } finally {
+    if (connection) connection.release();
   }
-})();
+};
 
+// Основные маршруты
 app.get("/", (req, res) => res.send("Booday Pizza API"));
 
 app.post("/admin/login", async (req, res) => {
@@ -141,16 +165,18 @@ app.post("/admin/login", async (req, res) => {
 
   try {
     const [users] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (users.length === 0) return res.status(401).json({ error: "Неверный email или пароль" });
+    if (!users.length) return res.status(401).json({ error: "Неверный email или пароль" });
 
     const user = users[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(401).json({ error: "Неверный email или пароль" });
+    if (!(await bcrypt.compare(password, user.password))) {
+      return res.status(401).json({ error: "Неверный email или пароль" });
+    }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка входа:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -160,7 +186,8 @@ app.get("/branches", async (req, res) => {
     const [branches] = await db.query("SELECT * FROM branches");
     res.json(branches);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения филиалов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -178,7 +205,8 @@ app.get("/products", async (req, res) => {
     `);
     res.json(products);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения продуктов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -191,7 +219,8 @@ app.get("/discounts", async (req, res) => {
     `);
     res.json(discounts);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения скидок:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -200,7 +229,8 @@ app.get("/stories", async (req, res) => {
     const [stories] = await db.query("SELECT * FROM stories");
     res.json(stories);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения историй:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -209,7 +239,8 @@ app.get("/categories", async (req, res) => {
     const [categories] = await db.query("SELECT * FROM categories");
     res.json(categories);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения категорий:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -219,18 +250,23 @@ app.get("/promo-codes", authenticateToken, async (req, res) => {
     const [promoCodes] = await db.query("SELECT * FROM promo_codes");
     res.json(promoCodes);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения промокодов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
 app.get("/promo-codes/check/:code", async (req, res) => {
   const { code } = req.params;
   try {
-    const [promo] = await db.query("SELECT * FROM promo_codes WHERE code = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())", [code]);
-    if (promo.length === 0) return res.status(404).json({ error: "Промокод не найден или недействителен" });
+    const [promo] = await db.query(
+      "SELECT * FROM promo_codes WHERE code = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())",
+      [code]
+    );
+    if (!promo.length) return res.status(404).json({ error: "Промокод не найден или недействителен" });
     res.json(promo[0]);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка проверки промокода:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -243,9 +279,16 @@ app.post("/promo-codes", authenticateToken, async (req, res) => {
       "INSERT INTO promo_codes (code, discount_percent, expires_at, is_active) VALUES (?, ?, ?, ?)",
       [code, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true]
     );
-    res.status(201).json({ id: result.insertId, code, discount_percent: discountPercent, expires_at: expiresAt || null, is_active: isActive !== undefined ? isActive : true });
+    res.status(201).json({
+      id: result.insertId,
+      code,
+      discount_percent: discountPercent,
+      expires_at: expiresAt || null,
+      is_active: isActive !== undefined ? isActive : true,
+    });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка создания промокода:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -259,9 +302,16 @@ app.put("/promo-codes/:id", authenticateToken, async (req, res) => {
       "UPDATE promo_codes SET code = ?, discount_percent = ?, expires_at = ?, is_active = ? WHERE id = ?",
       [code, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true, id]
     );
-    res.json({ id, code, discount_percent: discountPercent, expires_at: expiresAt || null, is_active: isActive !== undefined ? isActive : true });
+    res.json({
+      id,
+      code,
+      discount_percent: discountPercent,
+      expires_at: expiresAt || null,
+      is_active: isActive !== undefined ? isActive : true,
+    });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка обновления промокода:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -271,7 +321,8 @@ app.delete("/promo-codes/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM promo_codes WHERE id = ?", [id]);
     res.json({ message: "Промокод удален" });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления промокода:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -284,7 +335,8 @@ app.post("/branches", authenticateToken, async (req, res) => {
     const [result] = await db.query("INSERT INTO branches (name, address, phone) VALUES (?, ?, ?)", [name, address || null, phone || null]);
     res.status(201).json({ id: result.insertId, name, address, phone });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка создания филиала:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -297,7 +349,8 @@ app.put("/branches/:id", authenticateToken, async (req, res) => {
     await db.query("UPDATE branches SET name = ?, address = ?, phone = ? WHERE id = ?", [name, address || null, phone || null, id]);
     res.json({ id, name, address, phone });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка обновления филиала:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -307,7 +360,8 @@ app.delete("/branches/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM branches WHERE id = ?", [id]);
     res.json({ message: "Филиал удален" });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления филиала:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -319,7 +373,8 @@ app.post("/categories", authenticateToken, async (req, res) => {
     const [result] = await db.query("INSERT INTO categories (name) VALUES (?)", [name]);
     res.status(201).json({ id: result.insertId, name });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка создания категории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -332,7 +387,8 @@ app.put("/categories/:id", authenticateToken, async (req, res) => {
     await db.query("UPDATE categories SET name = ? WHERE id = ?", [name, id]);
     res.json({ id, name });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка обновления категории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -342,7 +398,8 @@ app.delete("/categories/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM categories WHERE id = ?", [id]);
     res.json({ message: "Категория удалена" });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления категории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -355,7 +412,8 @@ app.get("/subcategories", authenticateToken, async (req, res) => {
     `);
     res.json(subcategories);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка получения подкатегорий:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -371,7 +429,8 @@ app.post("/subcategories", authenticateToken, async (req, res) => {
     );
     res.status(201).json(newSubcategory[0]);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка создания подкатегории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -388,7 +447,8 @@ app.put("/subcategories/:id", authenticateToken, async (req, res) => {
     );
     res.json(updatedSubcategory[0]);
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка обновления подкатегории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -398,19 +458,15 @@ app.delete("/subcategories/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM subcategories WHERE id = ?", [id]);
     res.json({ message: "Подкатегория удалена" });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления подкатегории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
 app.post("/products", authenticateToken, (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
-      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
-    }
-
+  uploadHandler(req, res, async (req, res) => {
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-    const imageUrl = req.file?.location; // URL изображения в S3
+    const imageUrl = req.file?.location;
 
     if (!name || !branchId || !categoryId || !imageUrl) {
       return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
@@ -453,28 +509,21 @@ app.post("/products", authenticateToken, (req, res) => {
 
       res.status(201).json(newProduct[0]);
     } catch (err) {
-      console.error("Ошибка при добавлении продукта:", err.message);
-      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+      console.error("Ошибка добавления продукта:", err.message);
+      res.status(500).json({ error: "Ошибка сервера" });
     }
   });
 });
 
 app.put("/products/:id", authenticateToken, (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
-      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
-    }
-
+  uploadHandler(req, res, async (req, res) => {
     const { id } = req.params;
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
     const imageUrl = req.file?.location;
 
     try {
       const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
-      if (existing.length === 0) {
-        return res.status(404).json({ error: "Продукт не найден" });
-      }
+      if (!existing.length) return res.status(404).json({ error: "Продукт не найден" });
 
       const updateImage = imageUrl || existing[0].image;
 
@@ -498,7 +547,6 @@ app.put("/products/:id", authenticateToken, (req, res) => {
         ]
       );
 
-      // Удаление старого изображения из S3, если загружено новое
       if (imageUrl && existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
@@ -525,8 +573,8 @@ app.put("/products/:id", authenticateToken, (req, res) => {
 
       res.json(updatedProduct[0]);
     } catch (err) {
-      console.error("Ошибка при обновлении продукта:", err.message);
-      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+      console.error("Ошибка обновления продукта:", err.message);
+      res.status(500).json({ error: "Ошибка сервера" });
     }
   });
 });
@@ -535,9 +583,8 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
     const [product] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
-    if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
+    if (!product.length) return res.status(404).json({ error: "Продукт не найден" });
 
-    // Удаление изображения из S3
     if (product[0].image) {
       try {
         const key = product[0].image.split("/").pop();
@@ -550,8 +597,8 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM products WHERE id = ?", [id]);
     res.json({ message: "Продукт удален" });
   } catch (err) {
-    console.error("Ошибка при удалении продукта:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления продукта:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -563,7 +610,8 @@ app.post("/discounts", authenticateToken, async (req, res) => {
     const [result] = await db.query("INSERT INTO discounts (product_id, discount_percent) VALUES (?, ?)", [productId, discountPercent]);
     res.status(201).json({ id: result.insertId, product_id: productId, discount_percent: discountPercent });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка создания скидки:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -576,7 +624,8 @@ app.put("/discounts/:id", authenticateToken, async (req, res) => {
     await db.query("UPDATE discounts SET product_id = ?, discount_percent = ? WHERE id = ?", [productId, discountPercent, id]);
     res.json({ id, product_id: productId, discount_percent: discountPercent });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка обновления скидки:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
@@ -586,17 +635,13 @@ app.delete("/discounts/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM discounts WHERE id = ?", [id]);
     res.json({ message: "Скидка удалена" });
   } catch (err) {
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления скидки:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
 app.post("/stories", authenticateToken, (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
-      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
-    }
-
+  uploadHandler(req, res, async (req, res) => {
     const imageUrl = req.file?.location;
     if (!imageUrl) return res.status(400).json({ error: "Изображение обязательно" });
 
@@ -604,32 +649,24 @@ app.post("/stories", authenticateToken, (req, res) => {
       const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
       res.status(201).json({ id: result.insertId, image: imageUrl });
     } catch (err) {
-      console.error("Ошибка при добавлении истории:", err.message);
-      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+      console.error("Ошибка добавления истории:", err.message);
+      res.status(500).json({ error: "Ошибка сервера" });
     }
   });
 });
 
 app.put("/stories/:id", authenticateToken, (req, res) => {
-  upload(req, res, async (err) => {
-    if (err) {
-      console.error("Ошибка загрузки изображения:", err.message);
-      return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
-    }
-
+  uploadHandler(req, res, async (req, res) => {
     const { id } = req.params;
     const imageUrl = req.file?.location;
 
     try {
       const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
-      if (existing.length === 0) {
-        return res.status(404).json({ error: "История не найдена" });
-      }
+      if (!existing.length) return res.status(404).json({ error: "История не найдена" });
 
       const updateImage = imageUrl || existing[0].image;
       await db.query("UPDATE stories SET image = ? WHERE id = ?", [updateImage, id]);
 
-      // Удаление старого изображения из S3, если загружено новое
       if (imageUrl && existing[0].image) {
         try {
           const oldKey = existing[0].image.split("/").pop();
@@ -641,8 +678,8 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
 
       res.json({ id, image: updateImage });
     } catch (err) {
-      console.error("Ошибка при обновлении истории:", err.message);
-      res.status(500).json({ error: "Ошибка сервера: " + err.message });
+      console.error("Ошибка обновления истории:", err.message);
+      res.status(500).json({ error: "Ошибка сервера" });
     }
   });
 });
@@ -651,9 +688,8 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
     const [story] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
-    if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
+    if (!story.length) return res.status(404).json({ error: "История не найдена" });
 
-    // Удаление изображения из S3
     if (story[0].image) {
       try {
         const key = story[0].image.split("/").pop();
@@ -666,59 +702,61 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
     res.json({ message: "История удалена" });
   } catch (err) {
-    console.error("Ошибка при удалении истории:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка удаления истории:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
 // Регистрация пользователя
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
-  if (!name || !email || !password) {
-    return res.status(400).json({ error: "Все поля обязательны" });
-  }
+  if (!name || !email || !password) return res.status(400).json({ error: "Все поля обязательны" });
 
   try {
     const [existingUsers] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (existingUsers.length > 0) {
-      return res.status(400).json({ error: "Пользователь с таким email уже существует" });
-    }
+    if (existingUsers.length) return res.status(400).json({ error: "Пользователь с таким email уже существует" });
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const [result] = await db.query("INSERT INTO users (name, email, password) VALUES (?, ?, ?)", [name, email, hashedPassword]);
     const token = jwt.sign({ id: result.insertId, email }, JWT_SECRET, { expiresIn: "1h" });
     res.status(201).json({ token, user: { id: result.insertId, name, email } });
   } catch (err) {
-    console.error("Ошибка при регистрации:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка регистрации:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
 // Вход пользователя
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) {
-    return res.status(400).json({ error: "Введите email и пароль" });
-  }
+  if (!email || !password) return res.status(400).json({ error: "Введите email и пароль" });
 
   try {
     const [users] = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-    if (users.length === 0) {
-      return res.status(401).json({ error: "Неверный email или пароль" });
-    }
+    if (!users.length) return res.status(401).json({ error: "Неверный email или пароль" });
 
     const user = users[0];
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
+    if (!(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: "Неверный email или пароль" });
     }
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: "1h" });
     res.json({ token, user: { id: user.id, name: user.name, email: user.email } });
   } catch (err) {
-    console.error("Ошибка при входе:", err.message);
-    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+    console.error("Ошибка входа:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
   }
 });
 
-app.listen(5000, () => console.log("Server running on port 5000"));
+// Запуск сервера
+const startServer = async () => {
+  try {
+    await initializeDatabase();
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+  } catch (err) {
+    console.error("Ошибка запуска сервера:", err.message);
+    process.exit(1);
+  }
+};
+
+startServer();
