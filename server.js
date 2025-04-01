@@ -139,12 +139,27 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Маршрут для получения изображения продукта по ключу
-app.get("/product-image/:key", async (req, res) => {
+// Опциональная аутентификация для маршрута изображений
+const optionalAuthenticateToken = (req, res, next) => {
+  const token = req.headers["authorization"]?.split(" ")[1];
+  if (token) {
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (!err) {
+        req.user = user; // Если токен валиден, добавляем пользователя в запрос
+      }
+      next(); // Продолжаем в любом случае
+    });
+  } else {
+    next(); // Если токена нет, просто продолжаем (для клиентской части)
+  }
+};
+
+// Маршрут для получения изображения продукта по ключу (доступен для всех, с опциональной аутентификацией)
+app.get("/product-image/:key", optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
 
   try {
-    const image = await getFromS3(key);
+    const image = await getFromS3(`boody-images/${key}`); // Предполагаем, что ключ передается без префикса
     res.setHeader("Content-Type", image.ContentType || "image/jpeg");
     image.Body.pipe(res);
   } catch (err) {
