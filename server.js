@@ -6,14 +6,14 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 
 // Настройка S3Client для Timeweb Cloud
 const s3Client = new S3Client({
@@ -26,7 +26,7 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 
-// Проверка подключения к S3 (тестовый запрос)
+// Проверка подключения к S3
 const testS3Connection = async () => {
   try {
     const command = new PutObjectCommand({
@@ -38,11 +38,11 @@ const testS3Connection = async () => {
     console.log("Успешно подключились к S3 и создали тестовый файл!");
   } catch (err) {
     console.error("Ошибка подключения к S3:", err.message);
-    throw err; // Останавливаем сервер, если S3 недоступен
+    throw err;
   }
 };
 
-// Настройка multer для загрузки файлов
+// Настройка multer для загрузки изображений
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -58,15 +58,14 @@ const upload = multer({
   },
 }).single("image");
 
-// Функция для загрузки файла в S3
+// Функция для загрузки изображения в S3
 const uploadToS3 = async (file) => {
-  const key = Date.now() + path.extname(file.originalname);
+  const key = `${Date.now()}${path.extname(file.originalname)}`;
   const params = {
     Bucket: process.env.S3_BUCKET,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype,
-    // Убрали ACL, так как Timeweb Cloud может не поддерживать
   };
 
   console.log("Параметры загрузки в S3:", params);
@@ -76,9 +75,8 @@ const uploadToS3 = async (file) => {
       client: s3Client,
       params,
     });
-
     const result = await upload.done();
-    console.log("Файл успешно загружен в S3:", result);
+    console.log("Изображение успешно загружено в S3:", result);
     return `${process.env.S3_ENDPOINT}/${process.env.S3_BUCKET}/${key}`;
   } catch (err) {
     console.error("Ошибка при загрузке в S3:", err.message);
@@ -86,7 +84,26 @@ const uploadToS3 = async (file) => {
   }
 };
 
-// Функция для удаления файла из S3
+// Функция для получения изображения из S3
+const getFromS3 = async (key) => {
+  const params = {
+    Bucket: process.env.S3_BUCKET,
+    Key: key,
+  };
+
+  console.log("Параметры получения из S3:", params);
+
+  try {
+    const command = new GetObjectCommand(params);
+    const data = await s3Client.send(command);
+    return data;
+  } catch (err) {
+    console.error("Ошибка при получении из S3:", err.message);
+    throw err;
+  }
+};
+
+// Функция для удаления изображения из S3
 const deleteFromS3 = async (key) => {
   const params = {
     Bucket: process.env.S3_BUCKET,
@@ -98,7 +115,7 @@ const deleteFromS3 = async (key) => {
   try {
     const command = new DeleteObjectCommand(params);
     await s3Client.send(command);
-    console.log("Файл успешно удален из S3:", key);
+    console.log("Изображение успешно удалено из S3:", key);
   } catch (err) {
     console.error("Ошибка удаления из S3:", err.message);
     throw err;
@@ -122,21 +139,32 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Маршрут для получения изображения продукта по ключу
+app.get("/product-image/:key", async (req, res) => {
+  const { key } = req.params;
+
+  try {
+    const image = await getFromS3(key);
+    res.setHeader("Content-Type", image.ContentType || "image/jpeg");
+    image.Body.pipe(res);
+  } catch (err) {
+    console.error("Ошибка при отправке изображения клиенту:", err.message);
+    res.status(500).json({ error: "Ошибка получения изображения: " + err.message });
+  }
+});
+
 // Инициализация сервера
 const initializeServer = async () => {
   try {
-    // Проверка подключения к MySQL
     const connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
-    // Проверка и создание таблицы branches
     const [branchColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'address'");
     if (branchColumns.length === 0) {
       await connection.query("ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)");
       console.log("Добавлены колонки address и phone в таблицу branches");
     }
 
-    // Проверка и создание таблицы products
     const [productColumns] = await connection.query("SHOW COLUMNS FROM products");
     const columns = productColumns.map((col) => col.Field);
 
@@ -155,7 +183,6 @@ const initializeServer = async () => {
       console.log("Добавлена колонка is_pizza в таблицу products");
     }
 
-    // Создание таблицы subcategories, если не существует
     await connection.query(`
       CREATE TABLE IF NOT EXISTS subcategories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -165,7 +192,6 @@ const initializeServer = async () => {
       )
     `);
 
-    // Создание таблицы promo_codes, если не существует
     await connection.query(`
       CREATE TABLE IF NOT EXISTS promo_codes (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -178,7 +204,6 @@ const initializeServer = async () => {
     `);
     console.log("Таблица promo_codes проверена/создана");
 
-    // Проверка и создание админа
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -189,15 +214,12 @@ const initializeServer = async () => {
     }
 
     connection.release();
-
-    // Проверка подключения к S3
     await testS3Connection();
 
-    // Запуск сервера
     app.listen(5000, () => console.log("Server running on port 5000"));
   } catch (err) {
     console.error("Ошибка инициализации сервера:", err.message);
-    process.exit(1); // Завершаем процесс, если инициализация не удалась
+    process.exit(1);
   }
 };
 
@@ -222,7 +244,6 @@ app.post("/admin/login", async (req, res) => {
   }
 });
 
-// Общедоступные маршруты
 app.get("/branches", async (req, res) => {
   try {
     const [branches] = await db.query("SELECT * FROM branches");
@@ -281,7 +302,6 @@ app.get("/categories", async (req, res) => {
   }
 });
 
-// Маршруты для промокодов
 app.get("/promo-codes", authenticateToken, async (req, res) => {
   try {
     const [promoCodes] = await db.query("SELECT * FROM promo_codes");
@@ -343,7 +363,6 @@ app.delete("/promo-codes/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Админские маршруты
 app.post("/branches", authenticateToken, async (req, res) => {
   const { name, address, phone } = req.body;
   if (!name) return res.status(400).json({ error: "Название филиала обязательно" });
@@ -746,7 +765,6 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
   }
 });
 
-// Регистрация пользователя
 app.post("/register", async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) {
@@ -769,7 +787,6 @@ app.post("/register", async (req, res) => {
   }
 });
 
-// Вход пользователя
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
@@ -796,5 +813,4 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// Запуск сервера
 initializeServer();
