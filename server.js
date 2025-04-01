@@ -58,9 +58,9 @@ const upload = multer({
   },
 }).single("image");
 
-// Функция для загрузки изображения в S3
+// Функция для загрузки изображения в S3 с путем boody-images/
 const uploadToS3 = async (file) => {
-  const key = `${Date.now()}${path.extname(file.originalname)}`;
+  const key = `boody-images/${Date.now()}${path.extname(file.originalname)}`;
   const params = {
     Bucket: process.env.S3_BUCKET,
     Key: key,
