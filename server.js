@@ -818,5 +818,14 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
+app.get("/users", authenticateToken, async (req, res) => {
+  try {
+    const [users] = await db.query("SELECT id, name, email FROM users");
+    res.json(users);
+  } catch (err) {
+    console.error("Ошибка при получении пользователей:", err.message);
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
 
 initializeServer();
