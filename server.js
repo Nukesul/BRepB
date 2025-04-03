@@ -45,18 +45,9 @@ const testS3Connection = async () => {
 // Настройка multer для загрузки изображений
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const filetypes = /jpeg|jpg|png|gif/;
-    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = filetypes.test(file.mimetype);
-    if (extname && mimetype) {
-      return cb(null, true);
-    } else {
-      cb(new Error("Только изображения (jpeg, jpg, png, gif) разрешены!"));
-    }
-  },
+  limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение по размеру (5MB)
 }).single("image");
+
 
 // Функция для загрузки изображения в S3 с путем boody-images/
 const uploadToS3 = async (file) => {
