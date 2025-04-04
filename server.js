@@ -48,7 +48,6 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение по размеру (5MB)
 }).single("image");
 
-
 // Функция для загрузки изображения в S3 с путем boody-images/
 const uploadToS3 = async (file) => {
   const key = `boody-images/${Date.now()}${path.extname(file.originalname)}`;
@@ -136,21 +135,20 @@ const optionalAuthenticateToken = (req, res, next) => {
   if (token) {
     jwt.verify(token, JWT_SECRET, (err, user) => {
       if (!err) {
-        req.user = user; // Если токен валиден, добавляем пользователя в запрос
+        req.user = user;
       }
-      next(); // Продолжаем в любом случае
+      next();
     });
   } else {
-    next(); // Если токена нет, просто продолжаем (для клиентской части)
+    next();
   }
 };
 
-// Маршрут для получения изображения продукта по ключу (доступен для всех, с опциональной аутентификацией)
+// Маршрут для получения изображения продукта по ключу (доступен для всех)
 app.get("/product-image/:key", optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
-
   try {
-    const image = await getFromS3(`boody-images/${key}`); // Предполагаем, что ключ передается без префикса
+    const image = await getFromS3(`boody-images/${key}`);
     res.setHeader("Content-Type", image.ContentType || "image/jpeg");
     image.Body.pipe(res);
   } catch (err) {
@@ -210,6 +208,23 @@ const initializeServer = async () => {
     `);
     console.log("Таблица promo_codes проверена/создана");
 
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        branch_id INT NOT NULL,
+        total DECIMAL(10,2) NOT NULL,
+        status ENUM('pending', 'processing', 'completed', 'cancelled') DEFAULT 'pending',
+        order_details JSON,
+        delivery_details JSON,
+        cart_items JSON,
+        discount INT DEFAULT 0,
+        promo_code VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+      )
+    `);
+    console.log("Таблица orders проверена/создана");
+
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -229,6 +244,89 @@ const initializeServer = async () => {
   }
 };
 
+// Публичные маршруты для клиентской части
+app.get("/api/public/branches", async (req, res) => {
+  try {
+    const [branches] = await db.query("SELECT id, name, address FROM branches");
+    res.json(branches);
+  } catch (err) {
+    console.error("Ошибка при получении филиалов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.get("/api/public/branches/:branchId/products", async (req, res) => {
+  const { branchId } = req.params;
+  try {
+    const [products] = await db.query(`
+      SELECT p.id, p.name, p.description, p.price_small, p.price_medium, p.price_large, 
+             p.price_single AS price, p.image AS image_url, c.name AS category
+      FROM products p
+      LEFT JOIN categories c ON p.category_id = c.id
+      WHERE p.branch_id = ?
+    `, [branchId]);
+    res.json(products);
+  } catch (err) {
+    console.error("Ошибка при получении продуктов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.get("/api/public/branches/:branchId/orders", async (req, res) => {
+  const { branchId } = req.params;
+  try {
+    const [orders] = await db.query(`
+      SELECT id, total, created_at, status
+      FROM orders
+      WHERE branch_id = ?
+      ORDER BY created_at DESC
+      LIMIT 10
+    `, [branchId]);
+    res.json(orders);
+  } catch (err) {
+    console.error("Ошибка при получении истории заказов:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/api/public/validate-promo", async (req, res) => {
+  const { promoCode } = req.body;
+  try {
+    const [promo] = await db.query("SELECT discount_percent AS discount FROM promo_codes WHERE code = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())", [promoCode]);
+    if (promo.length === 0) {
+      return res.status(400).json({ message: "Промокод недействителен" });
+    }
+    res.json({ discount: promo[0].discount });
+  } catch (err) {
+    console.error("Ошибка при проверке промокода:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+app.post("/api/public/send-order", async (req, res) => {
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
+  try {
+    const total = cartItems.reduce((sum, item) => sum + item.discountedPrice * item.quantity, 0);
+    const [result] = await db.query(`
+      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+    `, [
+      branchId,
+      total,
+      JSON.stringify(orderDetails),
+      JSON.stringify(deliveryDetails),
+      JSON.stringify(cartItems),
+      discount,
+      promoCode || null
+    ]);
+    res.json({ message: "Заказ успешно отправлен", orderId: result.insertId });
+  } catch (err) {
+    console.error("Ошибка при отправке заказа:", err.message);
+    res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+// Остальные маршруты (защищенные для админки)
 app.get("/", (req, res) => res.send("Booday Pizza API"));
 
 app.post("/admin/login", async (req, res) => {
@@ -250,7 +348,7 @@ app.post("/admin/login", async (req, res) => {
   }
 });
 
-app.get("/branches", async (req, res) => {
+app.get("/branches", authenticateToken, async (req, res) => {
   try {
     const [branches] = await db.query("SELECT * FROM branches");
     res.json(branches);
@@ -259,7 +357,7 @@ app.get("/branches", async (req, res) => {
   }
 });
 
-app.get("/products", async (req, res) => {
+app.get("/products", authenticateToken, async (req, res) => {
   try {
     const [products] = await db.query(`
       SELECT p.*, 
@@ -277,7 +375,7 @@ app.get("/products", async (req, res) => {
   }
 });
 
-app.get("/discounts", async (req, res) => {
+app.get("/discounts", authenticateToken, async (req, res) => {
   try {
     const [discounts] = await db.query(`
       SELECT d.*, p.name as product_name 
@@ -290,7 +388,7 @@ app.get("/discounts", async (req, res) => {
   }
 });
 
-app.get("/stories", async (req, res) => {
+app.get("/stories", authenticateToken, async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
     res.json(stories);
@@ -299,7 +397,7 @@ app.get("/stories", async (req, res) => {
   }
 });
 
-app.get("/categories", async (req, res) => {
+app.get("/categories", authenticateToken, async (req, res) => {
   try {
     const [categories] = await db.query("SELECT * FROM categories");
     res.json(categories);
@@ -317,7 +415,7 @@ app.get("/promo-codes", authenticateToken, async (req, res) => {
   }
 });
 
-app.get("/promo-codes/check/:code", async (req, res) => {
+app.get("/promo-codes/check/:code", authenticateToken, async (req, res) => {
   const { code } = req.params;
   try {
     const [promo] = await db.query("SELECT * FROM promo_codes WHERE code = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())", [code]);
@@ -818,6 +916,7 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
+
 app.get("/users", authenticateToken, async (req, res) => {
   try {
     const [users] = await db.query("SELECT id, name, email FROM users");
