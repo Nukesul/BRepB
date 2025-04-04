@@ -18,19 +18,21 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 // Настройка S3Client для Timeweb Cloud
 const s3Client = new S3Client({
   credentials: {
-    accessKeyId: process.env.S3_ACCESS_KEY,
-    secretAccessKey: process.env.S3_SECRET_KEY,
+    accessKeyId: "DN1NLZTORA2L6NZ529JJ",
+    secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
   },
-  endpoint: process.env.S3_ENDPOINT,
-  region: process.env.S3_REGION,
+  endpoint: "https://s3.twcstorage.ru",
+  region: "ru-1",
   forcePathStyle: true,
 });
+
+const S3_BUCKET = "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75";
 
 // Проверка подключения к S3
 const testS3Connection = async () => {
   try {
     const command = new PutObjectCommand({
-      Bucket: process.env.S3_BUCKET,
+      Bucket: S3_BUCKET,
       Key: "test-connection.txt",
       Body: "This is a test file to check S3 connection.",
     });
@@ -52,7 +54,7 @@ const upload = multer({
 const uploadToS3 = async (file) => {
   const key = `boody-images/${Date.now()}${path.extname(file.originalname)}`;
   const params = {
-    Bucket: process.env.S3_BUCKET,
+    Bucket: S3_BUCKET,
     Key: key,
     Body: file.buffer,
     ContentType: file.mimetype,
@@ -65,9 +67,9 @@ const uploadToS3 = async (file) => {
       client: s3Client,
       params,
     });
-    const result = await upload.done();
-    console.log("Изображение успешно загружено в S3:", result);
-    return `${process.env.S3_ENDPOINT}/${process.env.S3_BUCKET}/${key}`;
+    await upload.done();
+    // Возвращаем только ключ, а не полный URL
+    return key;
   } catch (err) {
     console.error("Ошибка при загрузке в S3:", err.message);
     throw err;
@@ -77,7 +79,7 @@ const uploadToS3 = async (file) => {
 // Функция для получения изображения из S3
 const getFromS3 = async (key) => {
   const params = {
-    Bucket: process.env.S3_BUCKET,
+    Bucket: S3_BUCKET,
     Key: key,
   };
 
@@ -96,7 +98,7 @@ const getFromS3 = async (key) => {
 // Функция для удаления изображения из S3
 const deleteFromS3 = async (key) => {
   const params = {
-    Bucket: process.env.S3_BUCKET,
+    Bucket: S3_BUCKET,
     Key: key,
   };
 
@@ -601,20 +603,20 @@ app.post("/products", authenticateToken, (req, res) => {
     }
 
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-    let imageUrl;
+    let imageKey;
 
     if (!req.file) {
       return res.status(400).json({ error: "Изображение обязательно" });
     }
 
     try {
-      imageUrl = await uploadToS3(req.file);
+      imageKey = await uploadToS3(req.file);
     } catch (s3Err) {
       console.error("Ошибка при загрузке в S3:", s3Err.message);
       return res.status(500).json({ error: "Ошибка загрузки в S3: " + s3Err.message });
     }
 
-    if (!name || !branchId || !categoryId || !imageUrl) {
+    if (!name || !branchId || !categoryId || !imageKey) {
       return res.status(400).json({ error: "Все обязательные поля должны быть заполнены (name, branchId, categoryId, image)" });
     }
 
@@ -634,7 +636,7 @@ app.post("/products", authenticateToken, (req, res) => {
           branchId,
           categoryId,
           subCategoryId || null,
-          imageUrl,
+          imageKey,
         ]
       );
 
@@ -670,7 +672,7 @@ app.put("/products/:id", authenticateToken, (req, res) => {
 
     const { id } = req.params;
     const { name, description, priceSmall, priceMedium, priceLarge, priceSingle, branchId, categoryId, subCategoryId } = req.body;
-    let imageUrl;
+    let imageKey;
 
     try {
       const [existing] = await db.query("SELECT image FROM products WHERE id = ?", [id]);
@@ -679,13 +681,13 @@ app.put("/products/:id", authenticateToken, (req, res) => {
       }
 
       if (req.file) {
-        imageUrl = await uploadToS3(req.file);
+        imageKey = await uploadToS3(req.file);
         if (existing[0].image) {
-          const oldKey = existing[0].image.split("/").pop();
+          const oldKey = existing[0].image;
           await deleteFromS3(oldKey);
         }
       } else {
-        imageUrl = existing[0].image;
+        imageKey = existing[0].image;
       }
 
       await db.query(
@@ -703,7 +705,7 @@ app.put("/products/:id", authenticateToken, (req, res) => {
           branchId,
           categoryId,
           subCategoryId || null,
-          imageUrl,
+          imageKey,
           id,
         ]
       );
@@ -738,8 +740,7 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
     if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
 
     if (product[0].image) {
-      const key = product[0].image.split("/").pop();
-      await deleteFromS3(key);
+      await deleteFromS3(product[0].image);
     }
 
     await db.query("DELETE FROM products WHERE id = ?", [id]);
@@ -792,22 +793,22 @@ app.post("/stories", authenticateToken, (req, res) => {
       return res.status(400).json({ error: "Ошибка загрузки изображения: " + err.message });
     }
 
-    let imageUrl;
+    let imageKey;
 
     if (!req.file) {
       return res.status(400).json({ error: "Изображение обязательно" });
     }
 
     try {
-      imageUrl = await uploadToS3(req.file);
+      imageKey = await uploadToS3(req.file);
     } catch (s3Err) {
       console.error("Ошибка при загрузке в S3:", s3Err.message);
       return res.status(500).json({ error: "Ошибка загрузки в S3: " + s3Err.message });
     }
 
     try {
-      const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageUrl]);
-      res.status(201).json({ id: result.insertId, image: imageUrl });
+      const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageKey]);
+      res.status(201).json({ id: result.insertId, image: imageKey });
     } catch (err) {
       console.error("Ошибка при добавлении истории:", err.message);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
@@ -823,7 +824,7 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
     }
 
     const { id } = req.params;
-    let imageUrl;
+    let imageKey;
 
     try {
       const [existing] = await db.query("SELECT image FROM stories WHERE id = ?", [id]);
@@ -832,17 +833,16 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
       }
 
       if (req.file) {
-        imageUrl = await uploadToS3(req.file);
+        imageKey = await uploadToS3(req.file);
         if (existing[0].image) {
-          const oldKey = existing[0].image.split("/").pop();
-          await deleteFromS3(oldKey);
+          await deleteFromS3(existing[0].image);
         }
       } else {
-        imageUrl = existing[0].image;
+        imageKey = existing[0].image;
       }
 
-      await db.query("UPDATE stories SET image = ? WHERE id = ?", [imageUrl, id]);
-      res.json({ id, image: imageUrl });
+      await db.query("UPDATE stories SET image = ? WHERE id = ?", [imageKey, id]);
+      res.json({ id, image: imageKey });
     } catch (err) {
       console.error("Ошибка при обновлении истории:", err.message);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
@@ -857,8 +857,7 @@ app.delete("/stories/:id", authenticateToken, async (req, res) => {
     if (story.length === 0) return res.status(404).json({ error: "История не найдена" });
 
     if (story[0].image) {
-      const key = story[0].image.split("/").pop();
-      await deleteFromS3(key);
+      await deleteFromS3(story[0].image);
     }
 
     await db.query("DELETE FROM stories WHERE id = ?", [id]);
