@@ -227,6 +227,16 @@ const initializeServer = async () => {
     `);
     console.log("Таблица orders проверена/создана");
 
+    // Проверяем и создаём таблицу stories, если её нет
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS stories (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        image VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("Таблица stories проверена/создана");
+
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -288,6 +298,22 @@ app.get("/api/public/branches/:branchId/orders", async (req, res) => {
   } catch (err) {
     console.error("Ошибка при получении истории заказов:", err.message);
     res.status(500).json({ error: "Ошибка сервера" });
+  }
+});
+
+// Новый публичный маршрут для получения историй
+app.get("/api/public/stories", async (req, res) => {
+  try {
+    const [stories] = await db.query("SELECT * FROM stories");
+    // Добавляем полный URL для изображений
+    const storiesWithUrls = stories.map(story => ({
+      ...story,
+      image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${story.image.split("/").pop()}`
+    }));
+    res.json(storiesWithUrls);
+  } catch (err) {
+    console.error("Ошибка при получении историй:", err.message);
+    res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
 
@@ -393,7 +419,12 @@ app.get("/discounts", authenticateToken, async (req, res) => {
 app.get("/stories", authenticateToken, async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
-    res.json(stories);
+    // Добавляем полный URL для изображений
+    const storiesWithUrls = stories.map(story => ({
+      ...story,
+      image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${story.image.split("/").pop()}`
+    }));
+    res.json(storiesWithUrls);
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -808,7 +839,7 @@ app.post("/stories", authenticateToken, (req, res) => {
 
     try {
       const [result] = await db.query("INSERT INTO stories (image) VALUES (?)", [imageKey]);
-      res.status(201).json({ id: result.insertId, image: imageKey });
+      res.status(201).json({ id: result.insertId, image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${imageKey.split("/").pop()}` });
     } catch (err) {
       console.error("Ошибка при добавлении истории:", err.message);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
@@ -842,7 +873,7 @@ app.put("/stories/:id", authenticateToken, (req, res) => {
       }
 
       await db.query("UPDATE stories SET image = ? WHERE id = ?", [imageKey, id]);
-      res.json({ id, image: imageKey });
+      res.json({ id, image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${imageKey.split("/").pop()}` });
     } catch (err) {
       console.error("Ошибка при обновлении истории:", err.message);
       res.status(500).json({ error: "Ошибка сервера: " + err.message });
