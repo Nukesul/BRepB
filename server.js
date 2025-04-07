@@ -993,15 +993,6 @@ ${cartItems.map((item) => `- ${item.name} (${item.quantity} шт. по ${item.or
 ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : "💸 Скидка не применена"}
 💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
     `;
-
-    // Отправка в Telegram
-    await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: orderText,
-      parse_mode: "Markdown",
-    });
-
-    // Сохранение в базу данных
     const [result] = await db.query(`
       INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
@@ -1014,6 +1005,13 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       discount || 0,
       promoCode || null
     ]);
+
+    // Отправка в Telegram
+    await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: orderText,
+      parse_mode: "Markdown",
+    });
 
     res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
   } catch (error) {
