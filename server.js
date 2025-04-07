@@ -8,7 +8,7 @@ const multer = require("multer");
 const path = require("path");
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
-
+const axios = require("axios");
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -954,6 +954,71 @@ app.get("/users", authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("Ошибка при получении пользователей:", err.message);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
+  }
+});
+
+app.post("/api/send-order", async (req, res) => {
+  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
+
+  // Проверка обязательных полей
+  if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
+    return res.status(400).json({ error: "Корзина пуста или содержит некорректные данные" });
+  }
+  if (!branchId) {
+    return res.status(400).json({ error: "Не указан филиал" });
+  }
+
+  try {
+    // Расчет стоимости
+    const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
+    const discountedTotal = total * (1 - (discount || 0) / 100);
+
+    // Формирование текста для Telegram
+    const orderText = `
+📦 *Новый заказ:*
+👤 Имя: ${orderDetails.name || "Нет"}
+📞 Телефон: ${orderDetails.phone || "Нет"}
+📝 Комментарии: ${orderDetails.comments || "Нет"}
+
+🚚 *Доставка:*
+👤 Имя: ${deliveryDetails.name || "Нет"}
+📞 Телефон: ${deliveryDetails.phone || "Нет"}
+📍 Адрес: ${deliveryDetails.address || "Нет"}
+📝 Комментарии: ${deliveryDetails.comments || "Нет"}
+
+🛒 *Товары:*
+${cartItems.map((item) => `- ${item.name} (${item.quantity} шт. по ${item.originalPrice} сом)`).join("\n")}
+
+💰 Итоговая стоимость: ${total.toFixed(2)} сом
+${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : "💸 Скидка не применена"}
+💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
+    `;
+
+    // Отправка в Telegram
+    await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: orderText,
+      parse_mode: "Markdown",
+    });
+
+    // Сохранение в базу данных
+    const [result] = await db.query(`
+      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
+      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
+    `, [
+      branchId,
+      discountedTotal,
+      JSON.stringify(orderDetails),
+      JSON.stringify(deliveryDetails),
+      JSON.stringify(cartItems),
+      discount || 0,
+      promoCode || null
+    ]);
+
+    res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
+  } catch (error) {
+    console.error("Ошибка при отправке заказа:", error.message);
+    res.status(500).json({ error: "Ошибка сервера: " + error.message });
   }
 });
 
