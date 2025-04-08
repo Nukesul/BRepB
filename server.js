@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("dotenv").config(); // Добавляем загрузку переменных окружения
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
@@ -18,15 +18,15 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_jwt_secret_key";
 // Настройка S3Client для Timeweb Cloud
 const s3Client = new S3Client({
   credentials: {
-    accessKeyId: "DN1NLZTORA2L6NZ529JJ",
-    secretAccessKey: "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
+    accessKeyId: process.env.S3_ACCESS_KEY || "DN1NLZTORA2L6NZ529JJ",
+    secretAccessKey: process.env.S3_SECRET_KEY || "iGg3syd3UiWzhoYbYlEEDSVX1HHVmWUptrBt81Y8",
   },
-  endpoint: "https://s3.twcstorage.ru",
-  region: "ru-1",
+  endpoint: process.env.S3_ENDPOINT || "https://s3.twcstorage.ru",
+  region: process.env.S3_REGION || "ru-1",
   forcePathStyle: true,
 });
 
-const S3_BUCKET = "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75";
+const S3_BUCKET = process.env.S3_BUCKET || "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75";
 
 // Проверка подключения к S3
 const testS3Connection = async () => {
@@ -68,7 +68,6 @@ const uploadToS3 = async (file) => {
       params,
     });
     await upload.done();
-    // Возвращаем только ключ, а не полный URL
     return key;
   } catch (err) {
     console.error("Ошибка при загрузке в S3:", err.message);
@@ -115,10 +114,10 @@ const deleteFromS3 = async (key) => {
 };
 
 const db = mysql.createPool({
-  host: process.env.MYSQL_HOST,
-  user: process.env.MYSQL_USER,
-  password: process.env.MYSQL_PASSWORD,
-  database: process.env.MYSQL_DATABASE,
+  host: process.env.MYSQL_HOST || "boodaikg.com",
+  user: process.env.MYSQL_USER || "ch79145_boodai",
+  password: process.env.MYSQL_PASSWORD || "16162007",
+  database: process.env.MYSQL_DATABASE || "ch79145_boodai",
 });
 
 const authenticateToken = (req, res, next) => {
@@ -227,7 +226,6 @@ const initializeServer = async () => {
     `);
     console.log("Таблица orders проверена/создана");
 
-    // Проверяем и создаём таблицу stories, если её нет
     await connection.query(`
       CREATE TABLE IF NOT EXISTS stories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -305,7 +303,6 @@ app.get("/api/public/branches/:branchId/orders", async (req, res) => {
 app.get("/api/public/stories", async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
-    // Добавляем полный URL для изображений
     const storiesWithUrls = stories.map(story => ({
       ...story,
       image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${story.image.split("/").pop()}`
@@ -333,24 +330,82 @@ app.post("/api/public/validate-promo", async (req, res) => {
 
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
+
+  // Проверка обязательных полей
+  if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
+    return res.status(400).json({ error: "Корзина пуста или содержит некорректные данные" });
+  }
+  if (!branchId) {
+    return res.status(400).json({ error: "Не указан филиал" });
+  }
+
   try {
-    const total = cartItems.reduce((sum, item) => sum + item.discountedPrice * item.quantity, 0);
+    // Расчет стоимости
+    const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
+    const discountedTotal = total * (1 - (discount || 0) / 100);
+
+    // Экранирование специальных символов для Markdown
+    const escapeMarkdown = (text) => {
+      return text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : "Нет";
+    };
+
+    // Формирование текста для Telegram
+    const orderText = `
+📦 *Новый заказ:*
+👤 Имя: ${escapeMarkdown(orderDetails.name)}
+📞 Телефон: ${escapeMarkdown(orderDetails.phone)}
+📝 Комментарии: ${escapeMarkdown(orderDetails.comments)}
+
+🚚 *Доставка:*
+👤 Имя: ${escapeMarkdown(deliveryDetails.name)}
+📞 Телефон: ${escapeMarkdown(deliveryDetails.phone)}
+📍 Адрес: ${escapeMarkdown(deliveryDetails.address)}
+📝 Комментарии: ${escapeMarkdown(deliveryDetails.comments)}
+
+🛒 *Товары:*
+${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join("\n")}
+
+💰 Итоговая стоимость: ${total.toFixed(2)} сом
+${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : "💸 Скидка не применена"}
+💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
+    `;
+
+    // Сохранение заказа в базе данных
     const [result] = await db.query(`
       INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
     `, [
       branchId,
-      total,
+      discountedTotal,
       JSON.stringify(orderDetails),
       JSON.stringify(deliveryDetails),
       JSON.stringify(cartItems),
-      discount,
+      discount || 0,
       promoCode || null
     ]);
-    res.json({ message: "Заказ успешно отправлен", orderId: result.insertId });
-  } catch (err) {
-    console.error("Ошибка при отправке заказа:", err.message);
-    res.status(500).json({ error: "Ошибка сервера" });
+
+    // Отправка в Telegram с улучшенной обработкой ошибок
+    try {
+      console.log("TELEGRAM_BOT_TOKEN:", process.env.TELEGRAM_BOT_TOKEN);
+      console.log("TELEGRAM_CHAT_ID:", process.env.TELEGRAM_CHAT_ID);
+      const response = await axios.post(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          chat_id: process.env.TELEGRAM_CHAT_ID,
+          text: orderText,
+          parse_mode: "Markdown",
+        }
+      );
+      console.log("Сообщение отправлено в Telegram:", response.data);
+    } catch (telegramError) {
+      console.error("Ошибка отправки в Telegram:", telegramError.response?.data || telegramError.message);
+      // Не прерываем выполнение, если Telegram не сработал
+    }
+
+    res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
+  } catch (error) {
+    console.error("Ошибка при отправке заказа:", error.message);
+    res.status(500).json({ error: "Ошибка сервера: " + error.message });
   }
 });
 
@@ -419,7 +474,6 @@ app.get("/discounts", authenticateToken, async (req, res) => {
 app.get("/stories", authenticateToken, async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
-    // Добавляем полный URL для изображений
     const storiesWithUrls = stories.map(story => ({
       ...story,
       image: `${process.env.BASE_URL || "https://nukesul-brepb-651f.twc1.net"}/product-image/${story.image.split("/").pop()}`
@@ -954,69 +1008,6 @@ app.get("/users", authenticateToken, async (req, res) => {
   } catch (err) {
     console.error("Ошибка при получении пользователей:", err.message);
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
-  }
-});
-
-app.post("/api/send-order", async (req, res) => {
-  const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
-
-  // Проверка обязательных полей
-  if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
-    return res.status(400).json({ error: "Корзина пуста или содержит некорректные данные" });
-  }
-  if (!branchId) {
-    return res.status(400).json({ error: "Не указан филиал" });
-  }
-
-  try {
-    // Расчет стоимости
-    const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
-    const discountedTotal = total * (1 - (discount || 0) / 100);
-
-    // Формирование текста для Telegram
-    const orderText = `
-📦 *Новый заказ:*
-👤 Имя: ${orderDetails.name || "Нет"}
-📞 Телефон: ${orderDetails.phone || "Нет"}
-📝 Комментарии: ${orderDetails.comments || "Нет"}
-
-🚚 *Доставка:*
-👤 Имя: ${deliveryDetails.name || "Нет"}
-📞 Телефон: ${deliveryDetails.phone || "Нет"}
-📍 Адрес: ${deliveryDetails.address || "Нет"}
-📝 Комментарии: ${deliveryDetails.comments || "Нет"}
-
-🛒 *Товары:*
-${cartItems.map((item) => `- ${item.name} (${item.quantity} шт. по ${item.originalPrice} сом)`).join("\n")}
-
-💰 Итоговая стоимость: ${total.toFixed(2)} сом
-${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} сом` : "💸 Скидка не применена"}
-💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
-    `;
-    const [result] = await db.query(`
-      INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
-      VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
-    `, [
-      branchId,
-      discountedTotal,
-      JSON.stringify(orderDetails),
-      JSON.stringify(deliveryDetails),
-      JSON.stringify(cartItems),
-      discount || 0,
-      promoCode || null
-    ]);
-
-    // Отправка в Telegram
-    await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: process.env.TELEGRAM_CHAT_ID,
-      text: orderText,
-      parse_mode: "Markdown",
-    });
-
-    res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
-  } catch (error) {
-    console.error("Ошибка при отправке заказа:", error.message);
-    res.status(500).json({ error: "Ошибка сервера: " + error.message });
   }
 });
 
