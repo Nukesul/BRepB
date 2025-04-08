@@ -299,7 +299,7 @@ app.get("/api/public/branches/:branchId/orders", async (req, res) => {
   }
 });
 
-// Новый публичный маршрут для получения историй
+// Новый публичный маршрут для получения
 app.get("/api/public/stories", async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
