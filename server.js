@@ -1,4 +1,4 @@
-require("dotenv").config(); // Добавляем загрузку переменных окружения
+require("dotenv").config();
 const express = require("express");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
@@ -31,8 +31,9 @@ const S3_BUCKET = process.env.S3_BUCKET || "4eeafbc6-4af2cd44-4c23-4530-a2bf-750
 
 // Настройки Telegram
 const TELEGRAM_CHAT_ID_BOODAI = process.env.TELEGRAM_CHAT_ID_BOODAI || "-1002311447135";
-const TELEGRAM_CHAT_ID_RAION = process.env.TELEGRAM_CHAT_ID_RAION || "-1002638475628"; // Обновляем на новый chat_id
+const TELEGRAM_CHAT_ID_RAION = process.env.TELEGRAM_CHAT_ID_RAION || "-1002638475628";
 const TELEGRAM_CHAT_ID_UNKNOWN = process.env.TELEGRAM_CHAT_ID_UNKNOWN || "-1001234567890";
+
 // Проверка подключения к S3
 const testS3Connection = async () => {
   try {
@@ -55,7 +56,7 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 }, // Ограничение по размеру (5MB)
 }).single("image");
 
-// Функция для загрузки изображения в S3 с путем boody-images/
+// Функция для загрузки изображения в S3
 const uploadToS3 = async (file) => {
   const key = `boody-images/${Date.now()}${path.extname(file.originalname)}`;
   const params = {
@@ -64,8 +65,6 @@ const uploadToS3 = async (file) => {
     Body: file.buffer,
     ContentType: file.mimetype,
   };
-
-  console.log("Параметры загрузки в S3:", params);
 
   try {
     const upload = new Upload({
@@ -87,8 +86,6 @@ const getFromS3 = async (key) => {
     Key: key,
   };
 
-  console.log("Параметры получения из S3:", params);
-
   try {
     const command = new GetObjectCommand(params);
     const data = await s3Client.send(command);
@@ -105,8 +102,6 @@ const deleteFromS3 = async (key) => {
     Bucket: S3_BUCKET,
     Key: key,
   };
-
-  console.log("Параметры удаления из S3:", params);
 
   try {
     const command = new DeleteObjectCommand(params);
@@ -152,7 +147,7 @@ const optionalAuthenticateToken = (req, res, next) => {
   }
 };
 
-// Маршрут для получения изображения продукта по ключу (доступен для всех)
+// Маршрут для получения изображения продукта по ключу
 app.get("/product-image/:key", optionalAuthenticateToken, async (req, res) => {
   const { key } = req.params;
   try {
@@ -178,13 +173,11 @@ const initializeServer = async () => {
       console.log("Добавлены колонки address и phone в таблицу branches");
     }
 
-    // Добавление колонки telegram_chat_id в таблицу branches
     const [telegramColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'telegram_chat_id'");
     if (telegramColumns.length === 0) {
       await connection.query("ALTER TABLE branches ADD COLUMN telegram_chat_id VARCHAR(50)");
       console.log("Добавлена колонка telegram_chat_id в таблицу branches");
 
-      // Обновление существующих филиалов с chat_id
       await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'BOODAI PIZZA'", [TELEGRAM_CHAT_ID_BOODAI]);
       await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Район'", [TELEGRAM_CHAT_ID_RAION]);
       await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Неизвестное действие'", [TELEGRAM_CHAT_ID_UNKNOWN]);
@@ -271,7 +264,7 @@ const initializeServer = async () => {
       console.log("Админ уже существует:", "admin@boodaypizza.com");
     }
 
-    // Проверка и добавление тестовых филиалов, если их нет
+    // Проверка и добавление тестовых филиалов
     const [branches] = await connection.query("SELECT * FROM branches");
     if (branches.length === 0) {
       await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["BOODAI PIZZA", TELEGRAM_CHAT_ID_BOODAI]);
@@ -290,7 +283,7 @@ const initializeServer = async () => {
   }
 };
 
-// Публичные маршруты для клиентской части
+// Публичные маршруты
 app.get("/api/public/branches", async (req, res) => {
   try {
     const [branches] = await db.query("SELECT id, name, address FROM branches");
@@ -335,7 +328,6 @@ app.get("/api/public/branches/:branchId/orders", async (req, res) => {
   }
 });
 
-// Новый публичный маршрут для получения историй
 app.get("/api/public/stories", async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
@@ -364,7 +356,7 @@ app.post("/api/public/validate-promo", async (req, res) => {
   }
 });
 
-// Обновленный маршрут для отправки заказов
+// Улучшенный маршрут для отправки заказов
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
 
@@ -422,11 +414,11 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
     ]);
 
     // Получение chat_id из базы данных
-    const [branch] = await db.query("SELECT telegram_chat_id FROM branches WHERE id = ?", [branchId]);
+    const [branch] = await db.query("SELECT telegram_chat_id, name FROM branches WHERE id = ?", [branchId]);
     let chatId;
 
-    console.log("branchId:", branchId); // Логируем branchId
-    console.log("Результат запроса к branches:", branch); // Логируем результат запроса
+    console.log("branchId:", branchId);
+    console.log("Результат запроса к branches:", branch);
 
     if (branch.length === 0) {
       console.error(`Филиал с id ${branchId} не найден в базе данных`);
@@ -435,7 +427,6 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
 
     if (!branch[0].telegram_chat_id) {
       console.error(`Для филиала с id ${branchId} не настроен telegram_chat_id`);
-      // Используем запасной вариант в зависимости от branchId
       if (parseInt(branchId) === 2) {
         chatId = TELEGRAM_CHAT_ID_RAION;
         console.log("Используем chat_id для Район:", chatId);
@@ -448,13 +439,38 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       }
     } else {
       chatId = branch[0].telegram_chat_id;
-      console.log(`Используем chat_id из базы данных для филиала ${branchId}:`, chatId);
+      console.log(`Используем chat_id из базы данных для филиала ${branchId} (${branch[0].name}):`, chatId);
     }
 
-    // Отправка в Telegram с улучшенной обработкой ошибок
+    // Проверка токена бота
+    if (!process.env.TELEGRAM_BOT_TOKEN) {
+      console.error("TELEGRAM_BOT_TOKEN не указан в переменных окружения");
+      return res.status(500).json({ error: "Ошибка сервера: TELEGRAM_BOT_TOKEN не настроен" });
+    }
+
+    // Проверка доступности chat_id
     try {
-      console.log("TELEGRAM_BOT_TOKEN:", process.env.TELEGRAM_BOT_TOKEN);
-      console.log("Отправка в chat_id:", chatId);
+      console.log("Проверка доступности chat_id:", chatId);
+      const testResponse = await axios.post(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          chat_id: chatId,
+          text: "Тестовое сообщение для проверки доступности чата.",
+          parse_mode: "Markdown",
+        }
+      );
+      console.log("Тестовое сообщение отправлено:", testResponse.data);
+    } catch (testError) {
+      console.error("Ошибка при проверке chat_id:", testError.response?.data || testError.message);
+      if (testError.response?.data?.error_code === 403) {
+        return res.status(500).json({ error: "Бот не имеет прав для отправки сообщений в эту группу. Убедитесь, что бот добавлен в группу и имеет права администратора." });
+      }
+      return res.status(500).json({ error: "Ошибка проверки Telegram чата: " + (testError.response?.data?.description || testError.message) });
+    }
+
+    // Отправка заказа в Telegram
+    try {
+      console.log("Отправка заказа в chat_id:", chatId);
       const response = await axios.post(
         `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
@@ -466,7 +482,7 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       console.log("Сообщение отправлено в Telegram:", response.data);
     } catch (telegramError) {
       console.error("Ошибка отправки в Telegram:", telegramError.response?.data || telegramError.message);
-      // Не прерываем выполнение, если Telegram не сработал
+      return res.status(500).json({ error: "Ошибка отправки в Telegram: " + (telegramError.response?.data?.description || telegramError.message) });
     }
 
     res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
@@ -476,7 +492,7 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
   }
 });
 
-// Остальные маршруты (защищенные для админки)
+// Остальные маршруты
 app.get("/", (req, res) => res.send("Booday Pizza API"));
 
 app.post("/admin/login", async (req, res) => {
