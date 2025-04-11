@@ -1057,5 +1057,4 @@ app.get("/users", authenticateToken, async (req, res) => {
   }
 });
 
-// Запуск сервера
 initializeServer();
