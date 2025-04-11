@@ -32,6 +32,7 @@ const S3_BUCKET = process.env.S3_BUCKET || "4eeafbc6-4af2cd44-4c23-4530-a2bf-750
 // Настройки Telegram
 const TELEGRAM_CHAT_ID_BOODAI = process.env.TELEGRAM_CHAT_ID_BOODAI || "-1002311447135";
 const TELEGRAM_CHAT_ID_RAION = process.env.TELEGRAM_CHAT_ID_RAION || "-4635798360";
+const TELEGRAM_CHAT_ID_UNKNOWN = process.env.TELEGRAM_CHAT_ID_UNKNOWN || "-1001234567890"; // Добавляем chat_id для "Неизвестное действие"
 
 // Проверка подключения к S3
 const testS3Connection = async () => {
@@ -187,6 +188,7 @@ const initializeServer = async () => {
       // Обновление существующих филиалов с chat_id
       await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'BOODAI PIZZA'", [TELEGRAM_CHAT_ID_BOODAI]);
       await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Район'", [TELEGRAM_CHAT_ID_RAION]);
+      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Неизвестное действие'", [TELEGRAM_CHAT_ID_UNKNOWN]);
       console.log("Обновлены telegram_chat_id для существующих филиалов");
     }
 
@@ -275,6 +277,7 @@ const initializeServer = async () => {
     if (branches.length === 0) {
       await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["BOODAI PIZZA", TELEGRAM_CHAT_ID_BOODAI]);
       await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["Район", TELEGRAM_CHAT_ID_RAION]);
+      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["Неизвестное действие", TELEGRAM_CHAT_ID_UNKNOWN]);
       console.log("Добавлены тестовые филиалы с telegram_chat_id");
     }
 
@@ -424,8 +427,14 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
     let chatId;
     if (branch.length === 0 || !branch[0].telegram_chat_id) {
       console.error("Филиал не найден или не настроен chat_id для Telegram");
-      // Используем chat_id для "BOODAI PIZZA" как запасной вариант
-      chatId = TELEGRAM_CHAT_ID_BOODAI;
+      // Используем chat_id в зависимости от branchId как запасной вариант
+      if (branchId == 2) {
+        chatId = TELEGRAM_CHAT_ID_RAION;
+      } else if (branchId == 3) {
+        chatId = TELEGRAM_CHAT_ID_UNKNOWN;
+      } else {
+        chatId = TELEGRAM_CHAT_ID_BOODAI; // По умолчанию для "BOODAI PIZZA"
+      }
     } else {
       chatId = branch[0].telegram_chat_id;
     }
@@ -1057,4 +1066,5 @@ app.get("/users", authenticateToken, async (req, res) => {
   }
 });
 
+// Запуск сервера
 initializeServer();
