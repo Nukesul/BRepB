@@ -9,6 +9,7 @@ const path = require("path");
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { Upload } = require("@aws-sdk/lib-storage");
 const axios = require("axios");
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -27,6 +28,10 @@ const s3Client = new S3Client({
 });
 
 const S3_BUCKET = process.env.S3_BUCKET || "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75";
+
+// Настройки Telegram
+const TELEGRAM_CHAT_ID_BOODAI = process.env.TELEGRAM_CHAT_ID_BOODAI || "-1002311447135";
+const TELEGRAM_CHAT_ID_RAION = process.env.TELEGRAM_CHAT_ID_RAION || "-4635798360";
 
 // Проверка подключения к S3
 const testS3Connection = async () => {
@@ -113,6 +118,7 @@ const deleteFromS3 = async (key) => {
   }
 };
 
+// Подключение к базе данных
 const db = mysql.createPool({
   host: process.env.MYSQL_HOST || "boodaikg.com",
   user: process.env.MYSQL_USER || "ch79145_boodai",
@@ -120,6 +126,7 @@ const db = mysql.createPool({
   database: process.env.MYSQL_DATABASE || "ch79145_boodai",
 });
 
+// Middleware для аутентификации токена
 const authenticateToken = (req, res, next) => {
   const token = req.headers["authorization"]?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "Токен отсутствует" });
@@ -164,12 +171,26 @@ const initializeServer = async () => {
     const connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
+    // Проверка и добавление колонок в таблицу branches
     const [branchColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'address'");
     if (branchColumns.length === 0) {
       await connection.query("ALTER TABLE branches ADD COLUMN address VARCHAR(255), ADD COLUMN phone VARCHAR(20)");
       console.log("Добавлены колонки address и phone в таблицу branches");
     }
 
+    // Добавление колонки telegram_chat_id в таблицу branches
+    const [telegramColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'telegram_chat_id'");
+    if (telegramColumns.length === 0) {
+      await connection.query("ALTER TABLE branches ADD COLUMN telegram_chat_id VARCHAR(50)");
+      console.log("Добавлена колонка telegram_chat_id в таблицу branches");
+
+      // Обновление существующих филиалов с chat_id
+      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'BOODAI PIZZA'", [TELEGRAM_CHAT_ID_BOODAI]);
+      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Район'", [TELEGRAM_CHAT_ID_RAION]);
+      console.log("Обновлены telegram_chat_id для существующих филиалов");
+    }
+
+    // Проверка и добавление колонок в таблицу products
     const [productColumns] = await connection.query("SHOW COLUMNS FROM products");
     const columns = productColumns.map((col) => col.Field);
 
@@ -188,6 +209,7 @@ const initializeServer = async () => {
       console.log("Добавлена колонка is_pizza в таблицу products");
     }
 
+    // Создание таблицы subcategories
     await connection.query(`
       CREATE TABLE IF NOT EXISTS subcategories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -197,6 +219,7 @@ const initializeServer = async () => {
       )
     `);
 
+    // Создание таблицы promo_codes
     await connection.query(`
       CREATE TABLE IF NOT EXISTS promo_codes (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -209,6 +232,7 @@ const initializeServer = async () => {
     `);
     console.log("Таблица promo_codes проверена/создана");
 
+    // Создание таблицы orders
     await connection.query(`
       CREATE TABLE IF NOT EXISTS orders (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -226,6 +250,7 @@ const initializeServer = async () => {
     `);
     console.log("Таблица orders проверена/создана");
 
+    // Создание таблицы stories
     await connection.query(`
       CREATE TABLE IF NOT EXISTS stories (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -235,6 +260,7 @@ const initializeServer = async () => {
     `);
     console.log("Таблица stories проверена/создана");
 
+    // Проверка и создание администратора
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
       const hashedPassword = await bcrypt.hash("admin123", 10);
@@ -242,6 +268,14 @@ const initializeServer = async () => {
       console.log("Админ создан: admin@boodaypizza.com / admin123");
     } else {
       console.log("Админ уже существует:", "admin@boodaypizza.com");
+    }
+
+    // Проверка и добавление тестовых филиалов, если их нет
+    const [branches] = await connection.query("SELECT * FROM branches");
+    if (branches.length === 0) {
+      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["BOODAI PIZZA", TELEGRAM_CHAT_ID_BOODAI]);
+      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["Район", TELEGRAM_CHAT_ID_RAION]);
+      console.log("Добавлены тестовые филиалы с telegram_chat_id");
     }
 
     connection.release();
@@ -299,7 +333,7 @@ app.get("/api/public/branches/:branchId/orders", async (req, res) => {
   }
 });
 
-// Новый публичный маршрут для получения
+// Новый публичный маршрут для получения историй
 app.get("/api/public/stories", async (req, res) => {
   try {
     const [stories] = await db.query("SELECT * FROM stories");
@@ -328,6 +362,7 @@ app.post("/api/public/validate-promo", async (req, res) => {
   }
 });
 
+// Обновленный маршрут для отправки заказов
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
 
@@ -384,14 +419,25 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       promoCode || null
     ]);
 
+    // Получение chat_id из базы данных
+    const [branch] = await db.query("SELECT telegram_chat_id FROM branches WHERE id = ?", [branchId]);
+    let chatId;
+    if (branch.length === 0 || !branch[0].telegram_chat_id) {
+      console.error("Филиал не найден или не настроен chat_id для Telegram");
+      // Используем chat_id для "BOODAI PIZZA" как запасной вариант
+      chatId = TELEGRAM_CHAT_ID_BOODAI;
+    } else {
+      chatId = branch[0].telegram_chat_id;
+    }
+
     // Отправка в Telegram с улучшенной обработкой ошибок
     try {
       console.log("TELEGRAM_BOT_TOKEN:", process.env.TELEGRAM_BOT_TOKEN);
-      console.log("TELEGRAM_CHAT_ID:", process.env.TELEGRAM_CHAT_ID);
+      console.log("Отправка в chat_id:", chatId);
       const response = await axios.post(
         `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
-          chat_id: process.env.TELEGRAM_CHAT_ID,
+          chat_id: chatId,
           text: orderText,
           parse_mode: "Markdown",
         }
@@ -555,12 +601,12 @@ app.delete("/promo-codes/:id", authenticateToken, async (req, res) => {
 });
 
 app.post("/branches", authenticateToken, async (req, res) => {
-  const { name, address, phone } = req.body;
+  const { name, address, phone, telegram_chat_id } = req.body;
   if (!name) return res.status(400).json({ error: "Название филиала обязательно" });
 
   try {
-    const [result] = await db.query("INSERT INTO branches (name, address, phone) VALUES (?, ?, ?)", [name, address || null, phone || null]);
-    res.status(201).json({ id: result.insertId, name, address, phone });
+    const [result] = await db.query("INSERT INTO branches (name, address, phone, telegram_chat_id) VALUES (?, ?, ?, ?)", [name, address || null, phone || null, telegram_chat_id || null]);
+    res.status(201).json({ id: result.insertId, name, address, phone, telegram_chat_id });
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -568,12 +614,12 @@ app.post("/branches", authenticateToken, async (req, res) => {
 
 app.put("/branches/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { name, address, phone } = req.body;
+  const { name, address, phone, telegram_chat_id } = req.body;
   if (!name) return res.status(400).json({ error: "Название филиала обязательно" });
 
   try {
-    await db.query("UPDATE branches SET name = ?, address = ?, phone = ? WHERE id = ?", [name, address || null, phone || null, id]);
-    res.json({ id, name, address, phone });
+    await db.query("UPDATE branches SET name = ?, address = ?, phone = ?, telegram_chat_id = ? WHERE id = ?", [name, address || null, phone || null, telegram_chat_id || null, id]);
+    res.json({ id, name, address, phone, telegram_chat_id });
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -1011,4 +1057,5 @@ app.get("/users", authenticateToken, async (req, res) => {
   }
 });
 
+// Запуск сервера
 initializeServer();
