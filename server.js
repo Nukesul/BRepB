@@ -356,29 +356,22 @@ app.post("/api/public/validate-promo", async (req, res) => {
   }
 });
 
-// Улучшенный маршрут для отправки заказов
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
 
-  // Проверка обязательных полей
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: "Корзина пуста или содержит некорректные данные" });
   }
   if (!branchId) {
-    return res.status(400).json({ error: "Не указан филиал" });
+    return res.status(400).json({ error: "Не указан филиал (branchId отсутствует)" });
   }
 
   try {
-    // Расчет стоимости
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
 
-    // Экранирование специальных символов для Markdown
-    const escapeMarkdown = (text) => {
-      return text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : "Нет";
-    };
+    const escapeMarkdown = (text) => text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : "Нет";
 
-    // Формирование текста для Telegram
     const orderText = `
 📦 *Новый заказ:*
 👤 Имя: ${escapeMarkdown(orderDetails.name)}
@@ -399,7 +392,6 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
 💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
     `;
 
-    // Сохранение заказа в базе данных
     const [result] = await db.query(`
       INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
@@ -413,7 +405,6 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       promoCode || null
     ]);
 
-    // Получение chat_id из базы данных
     const [branch] = await db.query("SELECT telegram_chat_id, name FROM branches WHERE id = ?", [branchId]);
     let chatId;
 
@@ -425,30 +416,25 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       return res.status(400).json({ error: `Филиал с id ${branchId} не найден` });
     }
 
-    if (!branch[0].telegram_chat_id) {
-      console.error(`Для филиала с id ${branchId} не настроен telegram_chat_id`);
+    chatId = branch[0].telegram_chat_id;
+    if (!chatId) {
+      console.warn(`Для филиала с id ${branchId} не указан telegram_chat_id, используем значения по умолчанию`);
       if (parseInt(branchId) === 2) {
         chatId = TELEGRAM_CHAT_ID_RAION;
-        console.log("Используем chat_id для Район:", chatId);
       } else if (parseInt(branchId) === 3) {
         chatId = TELEGRAM_CHAT_ID_UNKNOWN;
-        console.log("Используем chat_id для Неизвестное действие:", chatId);
       } else {
         chatId = TELEGRAM_CHAT_ID_BOODAI;
-        console.log("Используем chat_id для BOODAI PIZZA (по умолчанию):", chatId);
       }
-    } else {
-      chatId = branch[0].telegram_chat_id;
-      console.log(`Используем chat_id из базы данных для филиала ${branchId} (${branch[0].name}):`, chatId);
     }
 
-    // Проверка токена бота
+    console.log(`Используем chat_id для филиала ${branch[0].name} (id: ${branchId}): ${chatId}`);
+
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.error("TELEGRAM_BOT_TOKEN не указан в переменных окружения");
       return res.status(500).json({ error: "Ошибка сервера: TELEGRAM_BOT_TOKEN не настроен" });
     }
 
-    // Проверка доступности chat_id
     try {
       console.log("Проверка доступности chat_id:", chatId);
       const testResponse = await axios.post(
@@ -468,7 +454,6 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       return res.status(500).json({ error: "Ошибка проверки Telegram чата: " + (testError.response?.data?.description || testError.message) });
     }
 
-    // Отправка заказа в Telegram
     try {
       console.log("Отправка заказа в chat_id:", chatId);
       const response = await axios.post(
