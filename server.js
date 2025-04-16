@@ -454,6 +454,7 @@ app.post("/api/public/validate-promo", async (req, res) => {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
+
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
 
@@ -512,48 +513,62 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       ]);
 
       const [branch] = await connection.query("SELECT telegram_chat_id, name FROM branches WHERE id = ?", [branchId]);
+      let chatId;
+
       if (branch.length === 0) {
         throw new Error(`Филиал с id ${branchId} не найден в базе данных`);
       }
 
-      // Определяем chat_id для обеих групп
-      const chatIds = [
-        { name: "BOODAI PIZZA", chatId: TELEGRAM_CHAT_ID_BOODAI },
-        { name: "Район", chatId: TELEGRAM_CHAT_ID_RAION }
-      ];
+      chatId = branch[0].telegram_chat_id;
+      if (!chatId) {
+        console.warn(`Для филиала с id ${branchId} не указан telegram_chat_id, используем значения по умолчанию`);
+        if (parseInt(branchId) === 2) {
+          chatId = TELEGRAM_CHAT_ID_RAION;
+        } else if (parseInt(branchId) === 3) {
+          chatId = TELEGRAM_CHAT_ID_UNKNOWN;
+        } else {
+          chatId = TELEGRAM_CHAT_ID_BOODAI;
+        }
+      }
+
+      console.log(`Используем chat_id для филиала ${branch[0].name} (id: ${branchId}): ${chatId}`);
 
       if (!process.env.TELEGRAM_BOT_TOKEN) {
         throw new Error("TELEGRAM_BOT_TOKEN не указан в переменных окружения");
       }
 
-      // Проверка доступности и отправка в обе группы
-      for (const group of chatIds) {
-        try {
-          console.log(`Проверка доступности chat_id для группы ${group.name}: ${group.chatId}`);
-          const testResponse = await axios.post(
-            `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: group.chatId,
-              text: "Тестовое сообщение для проверки доступности чата.",
-              parse_mode: "Markdown",
-            }
-          );
-          console.log(`Тестовое сообщение отправлено в ${group.name}:`, testResponse.data);
+      // Тестовое сообщение
+      try {
+        console.log("Проверка доступности chat_id:", chatId);
+        const testResponse = await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: chatId,
+            text: "Тестовое сообщение для проверки доступности чата.",
+            parse_mode: "Markdown",
+          }
+        );
+        console.log("Тестовое сообщение отправлено:", testResponse.data);
+      } catch (testError) {
+        console.error("Ошибка при проверке chat_id:", testError.response?.data || testError.message);
+        throw new Error("Ошибка проверки Telegram чата: " + (testError.response?.data?.description || testError.message));
+      }
 
-          console.log(`Отправка заказа в ${group.name} (chat_id: ${group.chatId})`);
-          const response = await axios.post(
-            `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-            {
-              chat_id: group.chatId,
-              text: orderText,
-              parse_mode: "Markdown",
-            }
-          );
-          console.log(`Сообщение успешно отправлено в ${group.name}:`, response.data);
-        } catch (telegramError) {
-          console.error(`Ошибка отправки в ${group.name}:`, telegramError.response?.data || telegramError.message);
-          // Продолжаем пытаться отправить в следующую группу, но логируем ошибку
-        }
+      // Отправка заказа
+      try {
+        console.log("Отправка заказа в chat_id:", chatId);
+        const response = await axios.post(
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            chat_id: chatId,
+            text: orderText,
+            parse_mode: "Markdown",
+          }
+        );
+        console.log("Сообщение отправлено в Telegram:", response.data);
+      } catch (telegramError) {
+        console.error("Ошибка отправки в Telegram:", telegramError.response?.data || telegramError.message);
+        throw new Error("Ошибка отправки в Telegram: " + (telegramError.response?.data?.description || telegramError.message));
       }
 
       await connection.commit();
@@ -570,11 +585,16 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       res.status(400).json({ error: error.message });
     } else if (error.message.includes("TELEGRAM_BOT_TOKEN")) {
       res.status(500).json({ error: error.message });
+    } else if (error.message.includes("проверки Telegram")) {
+      res.status(500).json({ error: error.message });
+    } else if (error.message.includes("отправки в Telegram")) {
+      res.status(500).json({ error: error.message });
     } else {
       res.status(500).json({ error: "Ошибка сервера: " + error.message });
     }
   }
 });
+
 // Остальные маршруты
 app.get("/", (req, res) => res.send("Booday Pizza API"));
 
