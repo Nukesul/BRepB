@@ -254,6 +254,34 @@ const initializeServer = async () => {
     `);
     console.log("Таблица stories проверена/создана");
 
+    // Создание таблицы discounts
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS discounts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        product_id INT NOT NULL,
+        discount_percent INT NOT NULL,
+        expires_at TIMESTAMP NULL DEFAULT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+      )
+    `);
+    console.log("Таблица discounts проверена/создана");
+
+    // Проверка и добавление колонок в таблицу discounts
+    const [discountColumns] = await connection.query("SHOW COLUMNS FROM discounts");
+    const discountFields = discountColumns.map((col) => col.Field);
+
+    if (!discountFields.includes("expires_at")) {
+      await connection.query("ALTER TABLE discounts ADD COLUMN expires_at TIMESTAMP NULL DEFAULT NULL");
+      console.log("Добавлена колонка expires_at в таблицу discounts");
+    }
+
+    if (!discountFields.includes("is_active")) {
+      await connection.query("ALTER TABLE discounts ADD COLUMN is_active BOOLEAN DEFAULT TRUE");
+      console.log("Добавлена колонка is_active в таблицу discounts");
+    }
+
     // Проверка и создание администратора
     const [users] = await connection.query("SELECT * FROM users WHERE email = ?", ["admin@boodaypizza.com"]);
     if (users.length === 0) {
@@ -299,9 +327,11 @@ app.get("/api/public/branches/:branchId/products", async (req, res) => {
   try {
     const [products] = await db.query(`
       SELECT p.id, p.name, p.description, p.price_small, p.price_medium, p.price_large, 
-             p.price_single AS price, p.image AS image_url, c.name AS category
+             p.price_single AS price, p.image AS image_url, c.name AS category,
+             d.discount_percent, d.expires_at
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
+      LEFT JOIN discounts d ON p.id = d.product_id AND d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
       WHERE p.branch_id = ?
     `, [branchId]);
     res.json(products);
@@ -514,11 +544,15 @@ app.get("/products", authenticateToken, async (req, res) => {
       SELECT p.*, 
              b.name as branch_name, 
              c.name as category_name,
-             s.name as subcategory_name
+             s.name as subcategory_name,
+             d.discount_percent,
+             d.expires_at,
+             d.is_active as discount_active
       FROM products p
       LEFT JOIN branches b ON p.branch_id = b.id
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN subcategories s ON p.sub_category_id = s.id
+      LEFT JOIN discounts d ON p.id = d.product_id AND d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
     `);
     res.json(products);
   } catch (err) {
@@ -532,6 +566,7 @@ app.get("/discounts", authenticateToken, async (req, res) => {
       SELECT d.*, p.name as product_name 
       FROM discounts d
       JOIN products p ON d.product_id = p.id
+      WHERE d.is_active = TRUE AND (d.expires_at IS NULL OR d.expires_at > NOW())
     `);
     res.json(discounts);
   } catch (err) {
@@ -905,12 +940,37 @@ app.delete("/products/:id", authenticateToken, async (req, res) => {
 });
 
 app.post("/discounts", authenticateToken, async (req, res) => {
-  const { productId, discountPercent } = req.body;
+  const { productId, discountPercent, expiresAt, isActive } = req.body;
   if (!productId || !discountPercent) return res.status(400).json({ error: "ID продукта и процент скидки обязательны" });
+  if (discountPercent < 1 || discountPercent > 100) return res.status(400).json({ error: "Процент скидки должен быть от 1 до 100" });
 
   try {
-    const [result] = await db.query("INSERT INTO discounts (product_id, discount_percent) VALUES (?, ?)", [productId, discountPercent]);
-    res.status(201).json({ id: result.insertId, product_id: productId, discount_percent: discountPercent });
+    // Проверка существования продукта
+    const [product] = await db.query("SELECT id FROM products WHERE id = ?", [productId]);
+    if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
+
+    // Проверка, есть ли уже активная скидка для этого продукта
+    const [existingDiscount] = await db.query(`
+      SELECT id FROM discounts 
+      WHERE product_id = ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
+    `, [productId]);
+    if (existingDiscount.length > 0) {
+      return res.status(400).json({ error: "Для этого продукта уже существует активная скидка" });
+    }
+
+    const [result] = await db.query(
+      "INSERT INTO discounts (product_id, discount_percent, expires_at, is_active) VALUES (?, ?, ?, ?)",
+      [productId, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true]
+    );
+
+    const [newDiscount] = await db.query(`
+      SELECT d.*, p.name as product_name 
+      FROM discounts d
+      JOIN products p ON d.product_id = p.id
+      WHERE d.id = ?
+    `, [result.insertId]);
+
+    res.status(201).json(newDiscount[0]);
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -918,12 +978,43 @@ app.post("/discounts", authenticateToken, async (req, res) => {
 
 app.put("/discounts/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
-  const { productId, discountPercent } = req.body;
+  const { productId, discountPercent, expiresAt, isActive } = req.body;
   if (!productId || !discountPercent) return res.status(400).json({ error: "ID продукта и процент скидки обязательны" });
+  if (discountPercent < 1 || discountPercent > 100) return res.status(400).json({ error: "Процент скидки должен быть от 1 до 100" });
 
   try {
-    await db.query("UPDATE discounts SET product_id = ?, discount_percent = ? WHERE id = ?", [productId, discountPercent, id]);
-    res.json({ id, product_id: productId, discount_percent: discountPercent });
+    // Проверка существования скидки
+    const [discount] = await db.query("SELECT product_id FROM discounts WHERE id = ?", [id]);
+    if (discount.length === 0) return res.status(404).json({ error: "Скидка не найдена" });
+
+    // Проверка существования продукта
+    const [product] = await db.query("SELECT id FROM products WHERE id = ?", [productId]);
+    if (product.length === 0) return res.status(404).json({ error: "Продукт не найден" });
+
+    // Проверка, есть ли другая активная скидка для этого продукта (кроме текущей)
+    if (discount[0].product_id !== productId) {
+      const [existingDiscount] = await db.query(`
+        SELECT id FROM discounts 
+        WHERE product_id = ? AND id != ? AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
+      `, [productId, id]);
+      if (existingDiscount.length > 0) {
+        return res.status(400).json({ error: "Для этого продукта уже существует другая активная скидка" });
+      }
+    }
+
+    await db.query(
+      "UPDATE discounts SET product_id = ?, discount_percent = ?, expires_at = ?, is_active = ? WHERE id = ?",
+      [productId, discountPercent, expiresAt || null, isActive !== undefined ? isActive : true, id]
+    );
+
+    const [updatedDiscount] = await db.query(`
+      SELECT d.*, p.name as product_name 
+      FROM discounts d
+      JOIN products p ON d.product_id = p.id
+      WHERE d.id = ?
+    `, [id]);
+
+    res.json(updatedDiscount[0]);
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -932,8 +1023,16 @@ app.put("/discounts/:id", authenticateToken, async (req, res) => {
 app.delete("/discounts/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
   try {
+    const [discount] = await db.query(`
+      SELECT d.*, p.name as product_name 
+      FROM discounts d
+      JOIN products p ON d.product_id = p.id
+      WHERE d.id = ?
+    `, [id]);
+    if (discount.length === 0) return res.status(404).json({ error: "Скидка не найдена" });
+
     await db.query("DELETE FROM discounts WHERE id = ?", [id]);
-    res.json({ message: "Скидка удалена" });
+    res.json({ message: "Скидка удалена", product: { id: discount[0].product_id, name: discount[0].product_name } });
   } catch (err) {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
@@ -1078,4 +1177,5 @@ app.get("/users", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Ошибка сервера: " + err.message });
   }
 });
+
 initializeServer();
