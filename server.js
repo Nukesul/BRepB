@@ -29,11 +29,6 @@ const s3Client = new S3Client({
 
 const S3_BUCKET = process.env.S3_BUCKET || "4eeafbc6-4af2cd44-4c23-4530-a2bf-750889dfdf75";
 
-// Настройки Telegram
-const TELEGRAM_CHAT_ID_BOODAI = process.env.TELEGRAM_CHAT_ID_BOODAI || "-1002311447135";
-const TELEGRAM_CHAT_ID_RAION = process.env.TELEGRAM_CHAT_ID_RAION || "-1002638475628";
-const TELEGRAM_CHAT_ID_UNKNOWN = process.env.TELEGRAM_CHAT_ID_UNKNOWN || "-1001234567890";
-
 // Проверка подключения к S3
 const testS3Connection = async () => {
   try {
@@ -166,6 +161,19 @@ const initializeServer = async () => {
     const connection = await db.getConnection();
     console.log("Подключено к MySQL");
 
+    // Создание таблицы branches, если она не существует
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS branches (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        address VARCHAR(255),
+        phone VARCHAR(20),
+        telegram_chat_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("Таблица branches проверена/создана");
+
     // Проверка и добавление колонок в таблицу branches
     const [branchColumns] = await connection.query("SHOW COLUMNS FROM branches LIKE 'address'");
     if (branchColumns.length === 0) {
@@ -177,11 +185,55 @@ const initializeServer = async () => {
     if (telegramColumns.length === 0) {
       await connection.query("ALTER TABLE branches ADD COLUMN telegram_chat_id VARCHAR(50)");
       console.log("Добавлена колонка telegram_chat_id в таблицу branches");
+    }
 
-      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'BOODAI PIZZA'", [TELEGRAM_CHAT_ID_BOODAI]);
-      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Район'", [TELEGRAM_CHAT_ID_RAION]);
-      await connection.query("UPDATE branches SET telegram_chat_id = ? WHERE name = 'Неизвестное действие'", [TELEGRAM_CHAT_ID_UNKNOWN]);
+    // Проверка и добавление филиалов с их telegram_chat_id
+    const [branches] = await connection.query("SELECT * FROM branches");
+    if (branches.length === 0) {
+      await connection.query(
+        "INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)",
+        ["BOODAI PIZZA", "-1002311447135"]
+      );
+      await connection.query(
+        "INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)",
+        ["Район", "-1002638475628"]
+      );
+      await connection.query(
+        "INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)",
+        ["Араванский", "-1002311447135"] // Временный chat_id (BOODAI PIZZA)
+      );
+      await connection.query(
+        "INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)",
+        ["Ошский район", "-1002638475628"] // Временный chat_id (Район)
+      );
+      console.log("Добавлены филиалы с telegram_chat_id");
+    } else {
+      // Обновляем telegram_chat_id для существующих филиалов, если они NULL
+      await connection.query(
+        "UPDATE branches SET telegram_chat_id = ? WHERE name = 'BOODAI PIZZA' AND (telegram_chat_id IS NULL OR telegram_chat_id = '')",
+        ["-1002311447135"]
+      );
+      await connection.query(
+        "UPDATE branches SET telegram_chat_id = ? WHERE name = 'Район' AND (telegram_chat_id IS NULL OR telegram_chat_id = '')",
+        ["-1002638475628"]
+      );
+      await connection.query(
+        "UPDATE branches SET telegram_chat_id = ? WHERE name = 'Араванский' AND (telegram_chat_id IS NULL OR telegram_chat_id = '')",
+        ["-1002311447135"] // Временный chat_id (BOODAI PIZZA)
+      );
+      await connection.query(
+        "UPDATE branches SET telegram_chat_id = ? WHERE name = 'Ошский район' AND (telegram_chat_id IS NULL OR telegram_chat_id = '')",
+        ["-1002638475628"] // Временный chat_id (Район)
+      );
       console.log("Обновлены telegram_chat_id для существующих филиалов");
+    }
+
+    // Проверка, что все филиалы имеют telegram_chat_id
+    const [allBranches] = await connection.query("SELECT id, name, telegram_chat_id FROM branches");
+    for (const branch of allBranches) {
+      if (!branch.telegram_chat_id) {
+        console.warn(`Филиал "${branch.name}" (id: ${branch.id}) не имеет telegram_chat_id. Установите его через админ-панель.`);
+      }
     }
 
     // Проверка и добавление колонок в таблицу products
@@ -212,6 +264,7 @@ const initializeServer = async () => {
         FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
       )
     `);
+    console.log("Таблица subcategories проверена/создана");
 
     // Создание таблицы promo_codes
     await connection.query(`
@@ -290,15 +343,6 @@ const initializeServer = async () => {
       console.log("Админ создан: admin@boodaypizza.com / admin123");
     } else {
       console.log("Админ уже существует:", "admin@boodaypizza.com");
-    }
-
-    // Проверка и добавление тестовых филиалов
-    const [branches] = await connection.query("SELECT * FROM branches");
-    if (branches.length === 0) {
-      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["BOODAI PIZZA", TELEGRAM_CHAT_ID_BOODAI]);
-      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["Район", TELEGRAM_CHAT_ID_RAION]);
-      await connection.query("INSERT INTO branches (name, telegram_chat_id) VALUES (?, ?)", ["Неизвестное действие", TELEGRAM_CHAT_ID_UNKNOWN]);
-      console.log("Добавлены тестовые филиалы с telegram_chat_id");
     }
 
     connection.release();
@@ -450,7 +494,7 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
     if (!chatId) {
       console.error(`Для филиала с id ${branchId} (название: ${branch[0].name}) не указан telegram_chat_id`);
       return res.status(500).json({
-        error: `Для филиала "${branch[0].name}" не настроен Telegram chat ID. Обратитесь к администратору.`,
+        error: `Для филиала "${branch[0].name}" не настроен Telegram chat ID. Пожалуйста, свяжитесь с администратором для настройки.`,
       });
     }
 
@@ -460,6 +504,7 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
       return res.status(500).json({ error: "Ошибка сервера: TELEGRAM_BOT_TOKEN не настроен" });
     }
 
+    // Отправка заказа в Telegram
     console.log(`Отправка заказа в Telegram для филиала "${branch[0].name}" (id: ${branchId}, chat_id: ${chatId})`);
     try {
       const response = await axios.post(
