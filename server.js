@@ -389,6 +389,7 @@ app.post("/api/public/validate-promo", async (req, res) => {
 app.post("/api/public/send-order", async (req, res) => {
   const { orderDetails, deliveryDetails, cartItems, discount, promoCode, branchId } = req.body;
 
+  // Проверка входных данных
   if (!cartItems || !Array.isArray(cartItems) || cartItems.length === 0) {
     return res.status(400).json({ error: "Корзина пуста или содержит некорректные данные" });
   }
@@ -397,22 +398,21 @@ app.post("/api/public/send-order", async (req, res) => {
   }
 
   try {
+    // Расчет стоимости заказа
     const total = cartItems.reduce((sum, item) => sum + (Number(item.originalPrice) || 0) * item.quantity, 0);
     const discountedTotal = total * (1 - (discount || 0) / 100);
 
-    const escapeMarkdown = (text) => text ? text.replace(/([_*[\]()~`>#+-.!])/g, '\\$1') : "Нет";
+    // Экранирование специальных символов для Markdown
+    const escapeMarkdown = (text) => (text ? text.replace(/([_*[\]()~`>#+-.!])/g, "\\$1") : "Нет");
 
+    // Формирование текста заказа
     const orderText = `
 📦 *Новый заказ:*
-👤 Имя: ${escapeMarkdown(orderDetails.name)}
-📞 Телефон: ${escapeMarkdown(orderDetails.phone)}
-📝 Комментарии: ${escapeMarkdown(orderDetails.comments)}
-
-🚚 *Доставка:*
-👤 Имя: ${escapeMarkdown(deliveryDetails.name)}
-📞 Телефон: ${escapeMarkdown(deliveryDetails.phone)}
-📍 Адрес: ${escapeMarkdown(deliveryDetails.address)}
-📝 Комментарии: ${escapeMarkdown(deliveryDetails.comments)}
+🏪 Филиал: ${escapeMarkdown((await db.query("SELECT name FROM branches WHERE id = ?", [branchId]))[0][0]?.name || "Неизвестный филиал")}
+👤 Имя: ${escapeMarkdown(orderDetails.name || deliveryDetails.name)}
+📞 Телефон: ${escapeMarkdown(orderDetails.phone || deliveryDetails.phone)}
+📝 Комментарии: ${escapeMarkdown(orderDetails.comments || deliveryDetails.comments || "Нет")}
+📍 Адрес доставки: ${escapeMarkdown(deliveryDetails.address || "Самовывоз")}
 
 🛒 *Товары:*
 ${cartItems.map((item) => `- ${escapeMarkdown(item.name)} (${item.quantity} шт. по ${item.originalPrice} сом)`).join("\n")}
@@ -422,70 +422,47 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
 💰 Итоговая сумма: ${discountedTotal.toFixed(2)} сом
     `;
 
-    const [result] = await db.query(`
+    // Сохранение заказа в базе данных
+    const [result] = await db.query(
+      `
       INSERT INTO orders (branch_id, total, status, order_details, delivery_details, cart_items, discount, promo_code)
       VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)
-    `, [
-      branchId,
-      discountedTotal,
-      JSON.stringify(orderDetails),
-      JSON.stringify(deliveryDetails),
-      JSON.stringify(cartItems),
-      discount || 0,
-      promoCode || null
-    ]);
+    `,
+      [
+        branchId,
+        discountedTotal,
+        JSON.stringify(orderDetails),
+        JSON.stringify(deliveryDetails),
+        JSON.stringify(cartItems),
+        discount || 0,
+        promoCode || null,
+      ]
+    );
 
-    const [branch] = await db.query("SELECT telegram_chat_id, name FROM branches WHERE id = ?", [branchId]);
-    let chatId;
-
-    console.log("branchId:", branchId);
-    console.log("Результат запроса к branches:", branch);
-
+    // Получение telegram_chat_id для филиала
+    const [branch] = await db.query("SELECT name, telegram_chat_id FROM branches WHERE id = ?", [branchId]);
     if (branch.length === 0) {
       console.error(`Филиал с id ${branchId} не найден в базе данных`);
       return res.status(400).json({ error: `Филиал с id ${branchId} не найден` });
     }
 
-    chatId = branch[0].telegram_chat_id;
+    const chatId = branch[0].telegram_chat_id;
     if (!chatId) {
-      console.warn(`Для филиала с id ${branchId} не указан telegram_chat_id, используем значения по умолчанию`);
-      if (parseInt(branchId) === 2) {
-        chatId = TELEGRAM_CHAT_ID_RAION;
-      } else if (parseInt(branchId) === 3) {
-        chatId = TELEGRAM_CHAT_ID_UNKNOWN;
-      } else {
-        chatId = TELEGRAM_CHAT_ID_BOODAI;
-      }
+      console.error(`Для филиала с id ${branchId} (название: ${branch[0].name}) не указан telegram_chat_id`);
+      return res.status(500).json({
+        error: `Для филиала "${branch[0].name}" не настроен Telegram chat ID. Обратитесь к администратору.`,
+      });
     }
 
-    console.log(`Используем chat_id для филиала ${branch[0].name} (id: ${branchId}): ${chatId}`);
-
+    // Проверка TELEGRAM_BOT_TOKEN
     if (!process.env.TELEGRAM_BOT_TOKEN) {
       console.error("TELEGRAM_BOT_TOKEN не указан в переменных окружения");
       return res.status(500).json({ error: "Ошибка сервера: TELEGRAM_BOT_TOKEN не настроен" });
     }
 
+    // Отправка заказа в Telegram
+    console.log(`Отправка заказа в Telegram для филиала "${branch[0].name}" (id: ${branchId}, chat_id: ${chatId})`);
     try {
-      console.log("Проверка доступности chat_id:", chatId);
-      const testResponse = await axios.post(
-        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-        {
-          chat_id: chatId,
-          text: "Тестовое сообщение для проверки доступности чата.",
-          parse_mode: "Markdown",
-        }
-      );
-      console.log("Тестовое сообщение отправлено:", testResponse.data);
-    } catch (testError) {
-      console.error("Ошибка при проверке chat_id:", testError.response?.data || testError.message);
-      if (testError.response?.data?.error_code === 403) {
-        return res.status(500).json({ error: "Бот не имеет прав для отправки сообщений в эту группу. Убедитесь, что бот добавлен в группу и имеет права администратора." });
-      }
-      return res.status(500).json({ error: "Ошибка проверки Telegram чата: " + (testError.response?.data?.description || testError.message) });
-    }
-
-    try {
-      console.log("Отправка заказа в chat_id:", chatId);
       const response = await axios.post(
         `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
@@ -494,10 +471,16 @@ ${promoCode ? `💸 Скидка (${discount}%): ${discountedTotal.toFixed(2)} �
           parse_mode: "Markdown",
         }
       );
-      console.log("Сообщение отправлено на Telegram:", response.data);
+      console.log(`Сообщение успешно отправлено в Telegram:`, response.data);
     } catch (telegramError) {
       console.error("Ошибка отправки в Telegram:", telegramError.response?.data || telegramError.message);
-      return res.status(500).json({ error: "Ошибка отправки в Telegram: " + (telegramError.response?.data?.description || telegramError.message) });
+      const errorDescription = telegramError.response?.data?.description || telegramError.message;
+      if (telegramError.response?.data?.error_code === 403) {
+        return res.status(500).json({
+          error: `Бот не имеет прав для отправки сообщений в группу (chat_id: ${chatId}). Убедитесь, что бот добавлен в группу и имеет права администратора.`,
+        });
+      }
+      return res.status(500).json({ error: `Ошибка отправки в Telegram: ${errorDescription}` });
     }
 
     res.status(200).json({ message: "Заказ успешно отправлен", orderId: result.insertId });
